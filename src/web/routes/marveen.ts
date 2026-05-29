@@ -6,7 +6,13 @@ import { hardRestartMarveenChannels } from '../channel-monitor.js'
 import { readFileOr } from '../agent-config.js'
 import { parseMultipart } from '../multipart.js'
 import { readBody, json, serveFile } from '../http-helpers.js'
+import { MAIN_CHANNELS_SESSION } from '../main-agent.js'
+import { readActiveModelFromProjectDir } from '../active-model.js'
 import type { RouteContext } from './types.js'
+
+function getActiveMarveenModel(): string {
+  return readActiveModelFromProjectDir(PROJECT_ROOT) ?? 'unknown'
+}
 
 export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promise<boolean> {
   const { req, res, path, method } = ctx
@@ -25,7 +31,8 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
     json(res, {
       name: BOT_NAME,
       description,
-      model: 'claude-opus-4-8',
+      model: getActiveMarveenModel(),
+      tmuxSession: MAIN_CHANNELS_SESSION,
       running: true,
       hasTelegram: tg.hasTelegram,
       telegramBotUsername: tg.botUsername,

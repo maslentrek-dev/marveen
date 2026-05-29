@@ -82,6 +82,17 @@ TMUX="$(command -v tmux)"
 [ -z "$CLAUDE" ] && echo "ERROR: claude not found on PATH" >&2 && exit 1
 [ -z "$TMUX" ]   && echo "ERROR: tmux not found on PATH" >&2 && exit 1
 
+# Read the main agent's default model from .claude/settings.json so we can
+# pass --model explicitly. Without --model claude-code falls back to its
+# built-in default, which can drift across versions. Passing the flag makes
+# the choice deterministic and visible in `ps`.
+MAIN_MODEL=""
+if [ -f "$INSTALL_DIR/.claude/settings.json" ] && command -v jq >/dev/null 2>&1; then
+  MAIN_MODEL="$(jq -r '.model // empty' "$INSTALL_DIR/.claude/settings.json" 2>/dev/null)"
+fi
+MODEL_FLAG=""
+[ -n "$MAIN_MODEL" ] && MODEL_FLAG="--model $MAIN_MODEL "
+
 # Régi session takarítás
 $TMUX kill-session -t "$SESSION" 2>/dev/null
 
@@ -92,7 +103,7 @@ $TMUX kill-session -t "$SESSION" 2>/dev/null
 # resuming one of those loses the --channels activation state, causing
 # "Channel notifications skipped: server not in --channels list" errors.
 $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
-  "$CLAUDE --dangerously-skip-permissions --channels plugin:${PLUGIN_ID}"
+  "$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}"
 
 # Session startup guard: a Claude Code first-run dialogusait auto-accept-eljuk
 # kulonben a headless session orokre parkolna a prompton es a Telegram plugin

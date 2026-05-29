@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER } from '../config.js'
+import { MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT } from '../config.js'
 import { agentDir, listAgentNames, readAgentChannelProvider } from './agent-config.js'
 import {
   agentHasChannel,
@@ -209,12 +209,30 @@ function triggerMarveenMemorySave(): void {
   }
 }
 
+// Read the main agent's configured model from .claude/settings.json so a
+// soft resume passes --model explicitly, mirroring scripts/channels.sh. Without
+// it the respawned session falls back to claude-code's built-in default and
+// silently drifts off the model the user picked. Returns '' when unset.
+function readConfiguredMainModel(): string {
+  try {
+    const settingsPath = join(PROJECT_ROOT, '.claude', 'settings.json')
+    if (!existsSync(settingsPath)) return ''
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    const model = parsed?.model
+    return typeof model === 'string' ? model.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
 function resumeMarveenSession(): boolean {
   const provider = getProvider(getMainAgentProvider())
   try {
+    const model = readConfiguredMainModel()
     const claudeCmd = [
       'export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
       '&&', CLAUDE, '--continue', '--dangerously-skip-permissions',
+      ...(model ? ['--model', model] : []),
       // NOTE: inbound from `--channels` goes through a separate
       // allowlist at /etc/claude-code/managed-settings.json
       // (allowedChannelPlugins). If the plugin isn't listed there,

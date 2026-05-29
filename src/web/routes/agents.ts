@@ -69,11 +69,14 @@ import {
   isAgentRunning,
   startAgentProcess,
   stopAgentProcess,
+  restartAgentProcess,
+  getAgentRunningSince,
   getAgentProcessInfo,
   agentSessionName,
   sendPromptToSession,
   capturePane,
 } from '../agent-process.js'
+import { readActiveModelFromProjectDir } from '../active-model.js'
 import { attemptChannelMcpReconnect } from '../channel-mcp-reconnect.js'
 import { getChannelHealth } from '../channel-health-monitor.js'
 import {
@@ -234,6 +237,8 @@ interface AgentSummary {
   displayName: string
   description: string
   model: string
+  activeModel: string | null
+  runningSince: number | null
   authMode: AuthMode
   securityProfile: string
   team: TeamConfig
@@ -266,12 +271,15 @@ function getAgentSummary(name: string): AgentSummary {
   const hasSoulMd = soulMd.trim().length > 0
 
   const proc = getAgentProcessInfo(name)
+  const runningSince = proc.running ? getAgentRunningSince(name) : null
 
   return {
     name,
     displayName: readAgentDisplayName(name),
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: readAgentModel(name),
+    activeModel: proc.running ? readActiveModelFromProjectDir(dir, runningSince ?? undefined) : null,
+    runningSince,
     authMode: readAgentAuthMode(name),
     securityProfile: readAgentSecurityProfile(name),
     team: readAgentTeam(name),
@@ -1063,6 +1071,16 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (stopMatch && method === 'POST') {
     const name = decodeURIComponent(stopMatch[1])
     const result = stopAgentProcess(name)
+    if (result.ok) { json(res, { ok: true }); return true }
+    json(res, { error: result.error }, 400)
+    return true
+  }
+
+  const restartMatch = path.match(/^\/api\/agents\/([^/]+)\/restart$/)
+  if (restartMatch && method === 'POST') {
+    const name = decodeURIComponent(restartMatch[1])
+    if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    const result = restartAgentProcess(name)
     if (result.ok) { json(res, { ok: true }); return true }
     json(res, { error: result.error }, 400)
     return true

@@ -40,6 +40,20 @@ export function isAgentRunning(name: string): boolean {
   }
 }
 
+export function getAgentRunningSince(name: string): number | null {
+  try {
+    const out = execFileSync(
+      TMUX,
+      ['display-message', '-p', '-t', agentSessionName(name), '#{session_created}'],
+      { timeout: 3000, encoding: 'utf-8' },
+    ).trim()
+    const ts = parseInt(out, 10)
+    return Number.isFinite(ts) ? ts : null
+  } catch {
+    return null
+  }
+}
+
 export function agentHasChannel(name: string): boolean {
   const agentProvider = resolveAgentProvider(name)
   const dir = agentDir(name)
@@ -236,6 +250,14 @@ export function getAgentProcessInfo(name: string): { running: boolean; session?:
     running: true,
     session: agentSessionName(name),
   }
+}
+
+export function restartAgentProcess(name: string): { ok: boolean; pid?: number; error?: string } {
+  if (isAgentRunning(name)) {
+    const stopResult = stopAgentProcess(name)
+    if (!stopResult.ok) return { ok: false, error: stopResult.error || 'Failed to stop running agent before restart' }
+  }
+  return startAgentProcess(name)
 }
 
 // Claude Code occasionally pops a "How is Claude doing this session? (optional)"
