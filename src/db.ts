@@ -179,6 +179,33 @@ export function initDatabase(): void {
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(agent_id, category)`)
 
+  // --- Conversation-continuity ledger (deterministic; P0 2026-06-02) ---
+  // A durable ROLLING TRANSCRIPT of every channel turn -- inbound user messages
+  // AND outbound replies -- per agent_id + chat_id. On a respawn (a fresh
+  // --channels session with no memory of the live conversation) the SessionStart
+  // replay hook injects the last ~20 turns of context PLUS highlights the open
+  // question (the most recent inbound with no later outbound), so the fresh
+  // session continues exactly where the connection dropped -- ZERO agent
+  // discretion. Generic across all three channel agents (marveen/dia/erno-ba);
+  // agent_id is derived from the session cwd so each session only sees its own
+  // chat. Written by the settings.json hooks (UserPromptSubmit capture +
+  // PostToolUse outbound). UNIQUE(...) makes inbound capture idempotent; outbound
+  // rows carry message_id=NULL so they are never deduped against each other.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversation_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      direction TEXT NOT NULL CHECK(direction IN ('in','out')),
+      message_id TEXT,
+      text TEXT,
+      ts TEXT,
+      created_at INTEGER NOT NULL,
+      UNIQUE(agent_id, chat_id, direction, message_id)
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_convlog_agent ON conversation_log(agent_id, created_at)`)
+
   // Migration: hot/warm/cold/shared tier system with an enforced CHECK.
   // Rebuilds the table whenever its current schema doesn't include the
   // canonical CHECK -- covers both the legacy ('user_pref'...) and the
