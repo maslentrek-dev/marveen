@@ -7144,22 +7144,35 @@ async function resolveOwnerName() {
 const chatAgentHasAvatar = new Map() // name -> true|false
 let chatSelectedAgent = null
 
-function chatMonogram(agentName, size) {
+function chatMonogramEl(agentName, size) {
   const letter = agentName.charAt(0).toUpperCase()
   const colors = ['#d97757','#00C2A8','#818cf8','#22c55e','#f59e0b','#ec4899']
   const color = colors[agentName.split('').reduce((a,c)=>a+c.charCodeAt(0),0) % colors.length]
   return `<div class="chat-avatar chat-avatar-mono" style="width:${size}px;height:${size}px;background:${color};font-size:${Math.round(size*0.4)}px">${letter}</div>`
 }
 
+// Global onerror handler — avoids HTML-in-attribute escaping issues
+window.chatImgError = function(img) {
+  const name = img.getAttribute('data-agent-name') || img.alt || '?'
+  const size = parseInt(img.width) || 32
+  const letter = name.charAt(0).toUpperCase()
+  const colors = ['#d97757','#00C2A8','#818cf8','#22c55e','#f59e0b','#ec4899']
+  const color = colors[name.split('').reduce((a,c)=>a+c.charCodeAt(0),0) % colors.length]
+  const div = document.createElement('div')
+  div.className = 'chat-avatar chat-avatar-mono'
+  div.style.cssText = `width:${size}px;height:${size}px;background:${color};font-size:${Math.round(size*0.4)}px`
+  div.textContent = letter
+  img.replaceWith(div)
+}
+
 function chatAvatarHtml(agentName, size = 32) {
   const lower = agentName.toLowerCase()
   const hasAvatar = chatAgentHasAvatar.get(lower)
-  if (!hasAvatar) return chatMonogram(agentName, size)
+  if (!hasAvatar) return chatMonogramEl(agentName, size)
   const src = lower === 'marveen'
     ? `/api/marveen/avatar?t=${Date.now()}`
     : `/api/agents/${encodeURIComponent(lower)}/avatar?t=${Date.now()}`
-  const mono = chatMonogram(agentName, size).replace(/`/g, '\`').replace(/\$/g, '\$')
-  return `<img class="chat-avatar" src="${src}" width="${size}" height="${size}" alt="${escapeHtml(agentName)}" onerror="this.outerHTML=\`${mono}\`">`
+  return `<img class="chat-avatar" src="${src}" width="${size}" height="${size}" alt="${escapeHtml(agentName)}" data-agent-name="${escapeHtml(agentName)}" onerror="chatImgError(this)">`
 }
 
 async function loadMessagesPage() {
@@ -7172,49 +7185,56 @@ async function loadChatAgentList() {
   const sidebar = document.getElementById('chatAgentList')
   if (!sidebar) return
   try {
-    // Load fleet agents from API + marveen (main agent)
-    const [agentsRes, msgsRes] = await Promise.all([
+    // Load fleet agents + threads in parallel
+    const [agentsRes, threadsRes] = await Promise.all([
       fetch('/api/agents'),
-      fetch('/api/messages?limit=200'),
+      fetch('/api/messages/threads'),
     ])
     const agentsRaw = agentsRes.ok ? await agentsRes.json() : []
-    const msgs = msgsRes.ok ? await msgsRes.json() : []
+    const threads = threadsRes.ok ? await threadsRes.json() : []
 
     // Build fleet list: API agents + marveen, minus system agents
     const fleetNames = ['marveen', ...agentsRaw.map(a => a.name || a)]
       .filter(n => !CHAT_SYSTEM_AGENTS.has(n))
       .filter((n, i, arr) => arr.indexOf(n) === i)
 
-    // Populate avatar map from API data (hasAvatar field)
+    // Populate avatar map from API data
     chatAgentHasAvatar.clear()
-    chatAgentHasAvatar.set('marveen', true) // main agent always has avatar endpoint
+    chatAgentHasAvatar.set('marveen', true)
     for (const a of agentsRaw) {
       if (a.name) chatAgentHasAvatar.set(a.name, !!a.hasAvatar)
     }
 
-    // Build message index: agentName -> {lastMsg, count}
-    const msgIndex = new Map()
-    for (const m of msgs) {
-      for (const party of [m.from_agent, m.to_agent]) {
-        if (CHAT_SYSTEM_AGENTS.has(party)) continue
-        if (!msgIndex.has(party)) msgIndex.set(party, { lastMsg: m, count: 0 })
-        msgIndex.get(party).count++
+    // Build index from /api/messages/threads (per-agent, no global-window bug)
+    const threadIndex = new Map() // agentName -> {lastMessage, count}
+    for (const t of threads) {
+      if (t.agent) threadIndex.set(t.agent, { lastMsg: t.lastMessage, count: t.count || 0 })
+    }
+    // Also include thread agents not in fleet (e.g. Szabolcs/owner direct msgs)
+    for (const t of threads) {
+      if (t.agent && !fleetNames.includes(t.agent) && !CHAT_SYSTEM_AGENTS.has(t.agent)) {
+        fleetNames.push(t.agent)
       }
     }
 
     // Sort: agents with messages first (by recency), rest alphabetical
-    const sorted = fleetNames.sort((a, b) => {
-      const aHas = msgIndex.has(a), bHas = msgIndex.has(b)
+    const sorted = [...fleetNames].sort((a, b) => {
+      const aHas = threadIndex.has(a), bHas = threadIndex.has(b)
       if (aHas && !bHas) return -1
       if (!aHas && bHas) return 1
-      if (aHas && bHas) return (msgIndex.get(b).lastMsg.created_at || 0) - (msgIndex.get(a).lastMsg.created_at || 0)
+      if (aHas && bHas) {
+        const aTime = threadIndex.get(a).lastMsg?.created_at || 0
+        const bTime = threadIndex.get(b).lastMsg?.created_at || 0
+        return bTime - aTime
+      }
       return a.localeCompare(b)
     })
 
     sidebar.innerHTML = sorted.map(name => {
-      const info = msgIndex.get(name)
-      const when = info ? new Date(info.lastMsg.created_at * 1000).toLocaleTimeString('hu-HU', {hour:'2-digit',minute:'2-digit'}) : ''
-      const preview = info ? (info.lastMsg.content || '').replace(/\n/g,' ').slice(0, 60) : 'Nincs üzenet'
+      const info = threadIndex.get(name)
+      const lm = info?.lastMsg
+      const when = lm?.created_at ? new Date(lm.created_at * 1000).toLocaleTimeString('hu-HU', {hour:'2-digit',minute:'2-digit'}) : ''
+      const preview = lm ? (lm.content || '').replace(/\n/g,' ').slice(0, 60) : 'Nincs üzenet'
       const isSelected = name === chatSelectedAgent ? ' selected' : ''
       const dimmed = info ? '' : ' style="opacity:0.5"'
       return `<div class="chat-agent-item${isSelected}" data-agent="${escapeHtml(name)}"${dimmed}>
