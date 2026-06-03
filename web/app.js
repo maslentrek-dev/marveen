@@ -7188,6 +7188,7 @@ function chatMarkSeen(agentName, maxId) {
   if (maxId > chatGetLastSeen(agentName)) localStorage.setItem(chatLastSeenKey(agentName), String(maxId))
 }
 function chatIsUnread(agentName, threadInfo) {
+  if (agentName !== CHAT_OWNER_AGENT) return false
   if (!threadInfo?.lastMsg) return false
   return threadInfo.lastMsg.id > chatGetLastSeen(agentName)
 }
