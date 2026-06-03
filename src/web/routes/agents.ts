@@ -81,6 +81,7 @@ import {
 } from '../agent-process.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
 import { detectPaneState } from '../../pane-state.js'
+import { detectReauthNeeded } from '../reauth-detect.js'
 import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
 import type { AutoRestartConfig } from '../../auto-restart.js'
 import { attemptChannelMcpReconnect } from '../channel-mcp-reconnect.js'
@@ -272,6 +273,10 @@ interface AgentSummary {
   /** Live context size in tokens (input+cache_read+cache_creation of the last
    *  turn), or null when not running / no transcript yet. */
   contextTokens: number | null
+  /** True when the running session's pane shows a login/401 auth failure --
+   *  drives the dashboard "reauth needed" badge + one-click /login button. */
+  needsReauth: boolean
+  reauthReason?: string
 }
 
 interface AgentDetail extends AgentSummary {
@@ -296,6 +301,10 @@ function getAgentSummary(name: string): AgentSummary {
   const proc = getAgentProcessInfo(name)
   const runningSince = proc.running ? getAgentRunningSince(name) : null
 
+  // Reauth badge: only meaningful for a running session (a stopped agent has
+  // no pane to inspect). One capture-pane per running agent on the list poll.
+  const reauth = proc.running ? detectReauthNeeded(capturePane(agentSessionName(name))) : { needsReauth: false }
+
   return {
     name,
     displayName: readAgentDisplayName(name),
@@ -315,6 +324,8 @@ function getAgentSummary(name: string): AgentSummary {
     hasAvatar: findAvatarForAgent(name) !== null,
     autoRestart: readAutoRestartConfig(name),
     contextTokens: proc.running ? readContextTokensFromProjectDir(dir, readAgentClaudeConfigDir(name) ?? undefined) : null,
+    needsReauth: reauth.needsReauth,
+    reauthReason: reauth.reason,
   }
 }
 

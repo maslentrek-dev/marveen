@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ClaudeClaw</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css">
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10/lib/addon-fit.js"></script>
 </head>
 <body>
   <div class="mobile-topbar">
@@ -2170,6 +2173,16 @@
 
   <div class="toast" id="toast"></div>
 
+  <!-- Terminal modal -->
+  <div class="modal-overlay" id="terminalOverlay">
+    <div class="modal terminal-modal">
+      <div class="modal-header">
+        <h2 id="terminalModalTitle">Terminal</h2>
+        <button class="modal-close" id="terminalClose">&times;</button>
+      </div>
+      <div id="terminalContainer" style="background:#1a1a1a;padding:8px;border-radius:0 0 8px 8px;flex:1;min-height:360px;"></div>
+    </div>
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>

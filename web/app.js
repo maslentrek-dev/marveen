@@ -1470,7 +1470,16 @@ function renderAgents() {
         <span class="process-indicator" title="Fut: a fő asszisztens mindig a --channels session-ben fut. Ez a kártya fixen Fut állapotot mutat, nincs per-ágens tmux-ellenőrzés."><span class="process-dot running"></span>Fut</span>
         <span class="tg-status" title="Online: a fő asszisztens csatornáját a --channels session kezeli, ezért fixen online (nincs külön token-ellenőrzés)."><span class="tg-dot connected"></span>Online</span>
       </div>
+      <div class="agent-card-actions">
+        <button class="btn-secondary btn-compact agent-terminal-btn" title="Terminal">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          Terminal
+        </button>
+      </div>
     `
+    mCard.querySelector('.agent-terminal-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation(); openTerminalModal('marveen')
+    })
     mCard.addEventListener('click', () => openMarveenDetail())
     agentsGrid.insertBefore(mCard, addBtn)
   }
@@ -1510,7 +1519,26 @@ function renderAgents() {
         <span class="process-indicator" title="${escapeHtml(processTip(isRunning))}"><span class="process-dot ${runDotClass}"></span>${runLabel}</span>
         <span class="tg-status" title="${escapeHtml(channelTip(chConnected))}"><span class="tg-dot ${chDotClass}"></span>${chLabel}</span>
       </div>
+      ${agent.needsReauth ? `
+        <div class="agent-reauth-banner">
+          <span class="agent-reauth-reason">${escapeHtml(agent.reauthReason || 'Újrabejelentkezés szükséges')}</span>
+          <button class="btn-danger btn-compact agent-login-btn" data-phase="start">Bejelentkezés</button>
+        </div>` : ''}
+      <div class="agent-card-actions">
+        <button class="btn-secondary btn-compact agent-terminal-btn" title="Terminal">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          Terminal
+        </button>
+      </div>
     `
+    // Login button handler (start → confirm flow)
+    card.querySelectorAll('.agent-login-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); handleAgentLogin(agent.name, btn) })
+    })
+    // Terminal button
+    card.querySelector('.agent-terminal-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation(); openTerminalModal(agent.name)
+    })
     card.addEventListener('click', () => openAgentDetail(agent.name))
     agentsGrid.insertBefore(card, addBtn)
   }
@@ -9292,6 +9320,135 @@ document.getElementById('ideaPromotePlan')?.addEventListener('click', () => prom
 document.getElementById('ideaStatusFilter')?.addEventListener('change', loadIdeasPage)
 document.getElementById('ideaCategoryFilter')?.addEventListener('change', loadIdeasPage)
 
+
+// === Agent reauth login flow ===
+async function handleAgentLogin(agentName, btn) {
+  const phase = btn.dataset.phase || 'start'
+  btn.disabled = true
+  const origText = btn.textContent
+  btn.textContent = phase === 'start' ? 'Indítás...' : 'Megerősítés...'
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phase }),
+    })
+    if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || 'HTTP ' + res.status) }
+    if (phase === 'start') {
+      btn.dataset.phase = 'confirm'
+      btn.textContent = 'Auth kész → Megerősít'
+      btn.disabled = false
+      showToast('Auth folyamat elindítva — engedélyezd a böngészőben, majd kattints Megerősít')
+    } else {
+      btn.textContent = 'Bejelentkezve'
+      showToast('Bejelentkezés sikeres')
+      setTimeout(() => loadAgents(), 1500)
+    }
+  } catch (e) {
+    showToast('Hiba: ' + (e.message || e))
+    btn.textContent = origText
+    btn.dataset.phase = 'start'
+    btn.disabled = false
+  }
+}
+
+// === Agent terminal modal (xterm.js) ===
+let terminalInstance = null
+let terminalSSE = null
+let terminalFit = null
+
+function openTerminalModal(agentName) {
+  const overlay = document.getElementById('terminalOverlay')
+  const container = document.getElementById('terminalContainer')
+  const title = document.getElementById('terminalModalTitle')
+  if (!overlay || !container) return
+
+  title.textContent = agentName + ' — Terminal'
+
+  // Cleanup previous
+  if (terminalSSE) { terminalSSE.close(); terminalSSE = null }
+  if (terminalInstance) { terminalInstance.dispose(); terminalInstance = null }
+  container.innerHTML = ''
+
+  // Init xterm
+  const term = new window.Terminal({
+    theme: { background: '#1a1a1a', foreground: '#e8e4da' },
+    fontFamily: 'JetBrains Mono, Menlo, monospace',
+    fontSize: 13,
+    cursorBlink: false,
+    disableStdin: false,
+    scrollback: 500,
+    convertEol: true,
+    allowProposedApi: true,
+  })
+  const fitAddon = new window.FitAddon.FitAddon()
+  term.loadAddon(fitAddon)
+  term.open(container)
+  fitAddon.fit()
+  terminalInstance = term
+  terminalFit = fitAddon
+
+  openModal(overlay)
+  setTimeout(() => term.focus(), 50)
+
+  // SSE pane stream
+  const token = localStorage.getItem('marveen-dashboard-token') || ''
+  const sse = new EventSource(`/api/agents/${encodeURIComponent(agentName)}/pane/stream?token=${encodeURIComponent(token)}`)
+  sse.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data)
+      if (msg.pane !== undefined) {
+        // Strip OSC-8 hyperlinks (not supported by xterm, cause visual noise)
+        const clean = msg.pane.replace(/\x1b]8;[^\x1b]*\x1b\\/g, '')
+        term.write('\x1b[2J\x1b[H' + clean)
+      }
+    } catch {}
+  }
+  sse.onerror = () => term.write('\r\n[stream hiba vagy leállva]\r\n')
+  terminalSSE = sse
+
+  // Input: regular chars
+  term.onData(data => {
+    fetch(`/api/agents/${encodeURIComponent(agentName)}/keys`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys: data }),
+    }).catch(() => {})
+  })
+
+  // Input: special keys
+  term.onKey(({ domEvent }) => {
+    const specialMap = {
+      'Enter': 'Enter', 'Escape': 'Escape',
+      'ArrowUp': 'Up', 'ArrowDown': 'Down', 'ArrowLeft': 'Left', 'ArrowRight': 'Right',
+      'Tab': domEvent.shiftKey ? 'S-Tab' : 'Tab',
+      'Backspace': 'BSpace',
+      'PageUp': 'PageUp', 'PageDown': 'PageDown',
+    }
+    let special = specialMap[domEvent.key]
+    if (!special && domEvent.ctrlKey) {
+      const ctrlMap = { c: 'C-c', d: 'C-d', u: 'C-u', l: 'C-l' }
+      special = ctrlMap[domEvent.key.toLowerCase()]
+    }
+    if (special) {
+      domEvent.preventDefault()
+      fetch(`/api/agents/${encodeURIComponent(agentName)}/keys`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ special }),
+      }).catch(() => {})
+    }
+  })
+
+  // Resize fit on modal resize
+  const ro = new ResizeObserver(() => { try { fitAddon.fit() } catch {} })
+  ro.observe(container)
+}
+
+document.getElementById('terminalClose')?.addEventListener('click', () => {
+  const overlay = document.getElementById('terminalOverlay')
+  if (overlay) closeModal(overlay)
+  if (terminalSSE) { terminalSSE.close(); terminalSSE = null }
+  if (terminalInstance) { terminalInstance.dispose(); terminalInstance = null }
+})
 ;(() => {
   function routeFromHash() {
     let pageId = decodeURIComponent((location.hash || '').replace(/^#/, ''))
