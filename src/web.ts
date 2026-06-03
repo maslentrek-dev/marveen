@@ -21,6 +21,7 @@ import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { logger } from './logger.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
 import { tryHandleMessages } from './web/routes/messages.js'
+import { tryHandleAgentTerminal } from './web/routes/agent-terminal.js'
 import { tryHandleDailyLog } from './web/routes/daily-log.js'
 import { tryHandleMemories } from './web/routes/memories.js'
 import { tryHandleMigrate } from './web/routes/migrate.js'
@@ -103,8 +104,15 @@ export function startWebServer(port = 3420): http.Server {
       const ok = checkBearerToken(req.headers.authorization, DASHBOARD_TOKEN)
       return json(res, { authenticated: ok })
     }
+    // The live pane SSE stream is consumed via EventSource, which cannot set an
+    // Authorization header -- accept the token via ?token= for this one GET
+    // path, validated with the same constant-time check. Everything else stays
+    // header-only.
+    const isSseStream = method === 'GET' && /^\/api\/agents\/[^/]+\/pane\/stream$/.test(path)
     if (path.startsWith('/api/') && !isPublicApi) {
-      if (!checkBearerToken(req.headers.authorization, DASHBOARD_TOKEN)) {
+      const headerOk = checkBearerToken(req.headers.authorization, DASHBOARD_TOKEN)
+      const queryOk = isSseStream && checkBearerToken(`Bearer ${url.searchParams.get('token') ?? ''}`, DASHBOARD_TOKEN)
+      if (!headerOk && !queryOk) {
         res.writeHead(401, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Unauthorized' }))
         return
@@ -125,6 +133,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleConnectors(routeCtx)) return
       if (await tryHandleAgentsSkills(routeCtx)) return
       if (await tryHandleSkills(routeCtx)) return
+      if (await tryHandleAgentTerminal(routeCtx)) return
       if (await tryHandleAgents(routeCtx, WEB_DIR)) return
       if (await tryHandleMarveen(routeCtx, WEB_DIR)) return
       if (await tryHandleBackgroundTasks(routeCtx)) return
