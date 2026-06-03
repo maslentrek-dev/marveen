@@ -7160,34 +7160,51 @@ async function loadMessagesPage() {
   await loadChatAgentList()
 }
 
+const CHAT_SYSTEM_AGENTS = new Set(['heartbeat','telegram-coordinator','channel-coordinator'])
+
 async function loadChatAgentList() {
   const sidebar = document.getElementById('chatAgentList')
   if (!sidebar) return
   try {
-    // Get all messages (limit 200) and group by other-party
-    const res = await fetch('/api/messages?limit=200')
-    if (!res.ok) throw new Error('HTTP ' + res.status)
-    const msgs = await res.json()
+    // Load fleet agents from API + marveen (main agent)
+    const [agentsRes, msgsRes] = await Promise.all([
+      fetch('/api/agents'),
+      fetch('/api/messages?limit=200'),
+    ])
+    const agentsRaw = agentsRes.ok ? await agentsRes.json() : []
+    const msgs = msgsRes.ok ? await msgsRes.json() : []
 
-    // Group: for each message, the "other party" from marveen's perspective
-    const threads = new Map() // agentName -> {lastMsg, count, unread}
+    // Build fleet list: API agents + marveen, minus system agents
+    const fleetNames = ['marveen', ...agentsRaw.map(a => a.name || a)]
+      .filter(n => !CHAT_SYSTEM_AGENTS.has(n))
+      .filter((n, i, arr) => arr.indexOf(n) === i)
+
+    // Build message index: agentName -> {lastMsg, count}
+    const msgIndex = new Map()
     for (const m of msgs) {
-      const other = m.from_agent === 'marveen' ? m.to_agent : m.from_agent
-      if (!threads.has(other)) threads.set(other, { lastMsg: m, count: 0 })
-      threads.get(other).count++
+      for (const party of [m.from_agent, m.to_agent]) {
+        if (CHAT_SYSTEM_AGENTS.has(party)) continue
+        if (!msgIndex.has(party)) msgIndex.set(party, { lastMsg: m, count: 0 })
+        msgIndex.get(party).count++
+      }
     }
 
-    if (threads.size === 0) {
-      sidebar.innerHTML = '<div class="chat-sidebar-empty">Nincs üzenet.</div>'
-      return
-    }
+    // Sort: agents with messages first (by recency), rest alphabetical
+    const sorted = fleetNames.sort((a, b) => {
+      const aHas = msgIndex.has(a), bHas = msgIndex.has(b)
+      if (aHas && !bHas) return -1
+      if (!aHas && bHas) return 1
+      if (aHas && bHas) return (msgIndex.get(b).lastMsg.created_at || 0) - (msgIndex.get(a).lastMsg.created_at || 0)
+      return a.localeCompare(b)
+    })
 
-    sidebar.innerHTML = Array.from(threads.entries()).map(([name, info]) => {
-      const m = info.lastMsg
-      const when = m.created_at ? new Date(m.created_at * 1000).toLocaleTimeString('hu-HU', {hour:'2-digit',minute:'2-digit'}) : ''
-      const preview = (m.content || '').replace(/\n/g,' ').slice(0, 60)
+    sidebar.innerHTML = sorted.map(name => {
+      const info = msgIndex.get(name)
+      const when = info ? new Date(info.lastMsg.created_at * 1000).toLocaleTimeString('hu-HU', {hour:'2-digit',minute:'2-digit'}) : ''
+      const preview = info ? (info.lastMsg.content || '').replace(/\n/g,' ').slice(0, 60) : 'Nincs üzenet'
       const isSelected = name === chatSelectedAgent ? ' selected' : ''
-      return `<div class="chat-agent-item${isSelected}" data-agent="${escapeHtml(name)}">
+      const dimmed = info ? '' : ' style="opacity:0.5"'
+      return `<div class="chat-agent-item${isSelected}" data-agent="${escapeHtml(name)}"${dimmed}>
         <div class="chat-agent-avatar">${chatAvatarHtml(name, 40)}</div>
         <div class="chat-agent-info">
           <div class="chat-agent-name">${escapeHtml(name)}</div>
@@ -7197,7 +7214,6 @@ async function loadChatAgentList() {
       </div>`
     }).join('')
 
-    // Bind clicks
     sidebar.querySelectorAll('.chat-agent-item').forEach(el => {
       el.addEventListener('click', () => {
         sidebar.querySelectorAll('.chat-agent-item').forEach(x => x.classList.remove('selected'))
@@ -7207,7 +7223,6 @@ async function loadChatAgentList() {
       })
     })
 
-    // Auto-select first if none
     if (!chatSelectedAgent) {
       const first = sidebar.querySelector('.chat-agent-item')
       if (first) first.click()
@@ -7233,7 +7248,7 @@ async function loadChatThread(agentName) {
     <div class="chat-compose">
       <div class="chat-compose-row">
         <textarea id="chatComposeText" class="chat-compose-input" rows="2" placeholder="Üzenet ${escapeHtml(agentName)}-nek..."></textarea>
-        <button class="btn-primary chat-send-btn" id="chatSendBtn">Küldés</button>
+        <button class="btn-primary btn-compact chat-send-btn" id="chatSendBtn">Küldés</button>
       </div>
     </div>
   `
