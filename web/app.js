@@ -9370,11 +9370,11 @@ function openTerminalModal(agentName) {
   if (terminalInstance) { terminalInstance.dispose(); terminalInstance = null }
   container.innerHTML = ''
 
-  // Init xterm
+  // Init xterm — fontSize 12 + wider modal fits ~140 chars of tmux output
   const term = new window.Terminal({
     theme: { background: '#1a1a1a', foreground: '#e8e4da' },
     fontFamily: 'JetBrains Mono, Menlo, monospace',
-    fontSize: 13,
+    fontSize: 12,
     cursorBlink: false,
     disableStdin: false,
     scrollback: 500,
@@ -9398,7 +9398,6 @@ function openTerminalModal(agentName) {
     try {
       const msg = JSON.parse(e.data)
       if (msg.pane !== undefined) {
-        // Strip OSC-8 hyperlinks (not supported by xterm, cause visual noise)
         const clean = msg.pane.replace(/\x1b]8;[^\x1b]*\x1b\\/g, '')
         term.write('\x1b[2J\x1b[H' + clean)
       }
@@ -9407,35 +9406,22 @@ function openTerminalModal(agentName) {
   sse.onerror = () => term.write('\r\n[stream hiba vagy leállva]\r\n')
   terminalSSE = sse
 
-  // Input: regular chars
+  // Single onData handler — maps escape sequences to {special}, plain chars to {keys}
+  // Using onData only (no onKey) avoids double-firing on arrow/Enter keys
+  const ESC_TO_SPECIAL = {
+    '\r': 'Enter', '\x1b': 'Escape',
+    '\x1b[A': 'Up', '\x1b[B': 'Down', '\x1b[C': 'Right', '\x1b[D': 'Left',
+    '\x7f': 'BSpace', '\t': 'Tab', '\x1b[Z': 'S-Tab',
+    '\x03': 'C-c', '\x04': 'C-d', '\x15': 'C-u', '\x0c': 'C-l',
+    '\x1b[5~': 'PageUp', '\x1b[6~': 'PageDown',
+  }
   term.onData(data => {
+    const special = ESC_TO_SPECIAL[data]
+    const body = special ? { special } : { keys: data }
     fetch(`/api/agents/${encodeURIComponent(agentName)}/keys`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ keys: data }),
+      body: JSON.stringify(body),
     }).catch(() => {})
-  })
-
-  // Input: special keys
-  term.onKey(({ domEvent }) => {
-    const specialMap = {
-      'Enter': 'Enter', 'Escape': 'Escape',
-      'ArrowUp': 'Up', 'ArrowDown': 'Down', 'ArrowLeft': 'Left', 'ArrowRight': 'Right',
-      'Tab': domEvent.shiftKey ? 'S-Tab' : 'Tab',
-      'Backspace': 'BSpace',
-      'PageUp': 'PageUp', 'PageDown': 'PageDown',
-    }
-    let special = specialMap[domEvent.key]
-    if (!special && domEvent.ctrlKey) {
-      const ctrlMap = { c: 'C-c', d: 'C-d', u: 'C-u', l: 'C-l' }
-      special = ctrlMap[domEvent.key.toLowerCase()]
-    }
-    if (special) {
-      domEvent.preventDefault()
-      fetch(`/api/agents/${encodeURIComponent(agentName)}/keys`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ special }),
-      }).catch(() => {})
-    }
   })
 
   // Resize fit on modal resize
