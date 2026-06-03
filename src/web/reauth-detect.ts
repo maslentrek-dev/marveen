@@ -26,15 +26,31 @@ const REAUTH_MARKERS: { rx: RegExp; reason: string }[] = [
   { rx: /session has expired.*\/login/i, reason: 'Session expired' },
 ]
 
+// Only scan the live tail of the pane, not the whole scrollback. A real auth
+// failure shows in the active error/prompt region at the bottom; scanning the
+// full capture would false-positive whenever an agent merely *discusses* these
+// strings higher up -- e.g. an agent reviewing THIS code, or a chat about a 401.
+// (Caught in review 2026-06-03: the reviewer's own pane was full of these
+// markers from reading reauth-detect.ts and would have falsely badged.)
+const TAIL_LINES = 15
+
+function tailOf(pane: string, n: number): string {
+  const lines = pane.split('\n')
+  return lines.slice(Math.max(0, lines.length - n)).join('\n')
+}
+
 /**
  * Inspect a captured pane and decide whether the session needs re-auth.
  * Returns { needsReauth:false } for a null/empty pane (capture failed / not
- * running) -- absence of evidence is not evidence of an auth problem.
+ * running) -- absence of evidence is not evidence of an auth problem. Only the
+ * last TAIL_LINES are scanned so scrollback that merely mentions the markers
+ * does not trigger a false badge.
  */
 export function detectReauthNeeded(pane: string | null | undefined): ReauthState {
   if (!pane) return { needsReauth: false }
+  const tail = tailOf(pane, TAIL_LINES)
   for (const m of REAUTH_MARKERS) {
-    if (m.rx.test(pane)) return { needsReauth: true, reason: m.reason }
+    if (m.rx.test(tail)) return { needsReauth: true, reason: m.reason }
   }
   return { needsReauth: false }
 }

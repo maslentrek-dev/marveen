@@ -44,4 +44,26 @@ describe('detectReauthNeeded', () => {
     const pane = '✻ Sautéed for 1m\n❯\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt'
     expect(detectReauthNeeded(pane).needsReauth).toBe(false)
   })
+
+  it('does NOT fire when the marker is in scrollback ABOVE the tail (review false-positive)', () => {
+    // Reproduces the review case: an agent reading reauth-detect.ts has the
+    // markers high in scrollback, but its live tail is a normal idle prompt.
+    const scrollback = [
+      'reviewing: detects "Invalid authentication credentials"',
+      'and "Please run /login" and "API Error: 401"',
+      ...Array.from({ length: 20 }, (_, i) => `... work line ${i} ...`),
+      '❯',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt',
+    ].join('\n')
+    expect(detectReauthNeeded(scrollback).needsReauth).toBe(false)
+  })
+
+  it('DOES fire when the marker is in the live tail', () => {
+    const pane = [
+      ...Array.from({ length: 20 }, (_, i) => `... work line ${i} ...`),
+      'API Error: 401 Invalid authentication credentials',
+      'Please run /login',
+    ].join('\n')
+    expect(detectReauthNeeded(pane).needsReauth).toBe(true)
+  })
 })

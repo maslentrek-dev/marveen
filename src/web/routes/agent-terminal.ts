@@ -1,4 +1,4 @@
-import { execFile, execSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { resolveFromPath } from '../../platform.js'
 import { logger } from '../../logger.js'
@@ -58,23 +58,25 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
     })
 
     let closed = false
+    let inFlight = false
     const tick = (): void => {
-      if (closed) return
-      // -e keeps ANSI colour/escapes so xterm renders the screen faithfully;
-      // -p prints to stdout; -J joins wrapped lines. The frontend repaints
-      // (clear+home) before writing each frame since this is a full snapshot.
-      let pane: string | null = null
-      try {
-        pane = execSync(`${TMUX} capture-pane -t ${session} -e -p`, { timeout: 3000, encoding: 'utf-8' })
-      } catch {
-        pane = null
-      }
-      const running = isAgentRunning(name)
-      try {
-        res.write(`data: ${JSON.stringify({ pane: pane ?? '', running })}\n\n`)
-      } catch {
-        closed = true
-      }
+      if (closed || inFlight) return // skip if a slow capture is still running
+      inFlight = true
+      // ASYNC execFile (arg array) -- NOT execSync: a setInterval execSync would
+      // block the WHOLE dashboard event loop for up to the tmux timeout on every
+      // tick, freezing all other HTTP requests. The arg array also avoids shell
+      // interpolation of `session`. -e keeps ANSI so xterm renders faithfully;
+      // -p prints; the frontend repaints (clear+home) each frame (full snapshot).
+      execFile(TMUX, ['capture-pane', '-t', session, '-e', '-p'], { timeout: 3000, encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+        inFlight = false
+        if (closed) return
+        const pane = err ? '' : (stdout ?? '')
+        try {
+          res.write(`data: ${JSON.stringify({ pane, running: isAgentRunning(name) })}\n\n`)
+        } catch {
+          closed = true
+        }
+      })
     }
 
     tick()
