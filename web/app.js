@@ -7140,20 +7140,26 @@ async function resolveOwnerName() {
 }
 
 // === Messages page ===
-const KNOWN_AGENT_AVATARS = new Set(['boni','deeper','iris','marveen','samu','zara'])
+// chatAgentHasAvatar: populated from /api/agents during loadChatAgentList
+const chatAgentHasAvatar = new Map() // name -> true|false
 let chatSelectedAgent = null
 
-function chatAvatarHtml(agentName, size = 32) {
-  const lower = agentName.toLowerCase()
-  const hasAvatar = KNOWN_AGENT_AVATARS.has(lower)
-  if (hasAvatar) {
-    return `<img class="chat-avatar" src="/avatars/${lower}-ref.png" width="${size}" height="${size}" alt="${escapeHtml(agentName)}" onerror="this.style.display='none'">`
-  }
-  // Monogram fallback
+function chatMonogram(agentName, size) {
   const letter = agentName.charAt(0).toUpperCase()
   const colors = ['#d97757','#00C2A8','#818cf8','#22c55e','#f59e0b','#ec4899']
   const color = colors[agentName.split('').reduce((a,c)=>a+c.charCodeAt(0),0) % colors.length]
   return `<div class="chat-avatar chat-avatar-mono" style="width:${size}px;height:${size}px;background:${color};font-size:${Math.round(size*0.4)}px">${letter}</div>`
+}
+
+function chatAvatarHtml(agentName, size = 32) {
+  const lower = agentName.toLowerCase()
+  const hasAvatar = chatAgentHasAvatar.get(lower)
+  if (!hasAvatar) return chatMonogram(agentName, size)
+  const src = lower === 'marveen'
+    ? `/api/marveen/avatar?t=${Date.now()}`
+    : `/api/agents/${encodeURIComponent(lower)}/avatar?t=${Date.now()}`
+  const mono = chatMonogram(agentName, size).replace(/`/g, '\`').replace(/\$/g, '\$')
+  return `<img class="chat-avatar" src="${src}" width="${size}" height="${size}" alt="${escapeHtml(agentName)}" onerror="this.outerHTML=\`${mono}\`">`
 }
 
 async function loadMessagesPage() {
@@ -7178,6 +7184,13 @@ async function loadChatAgentList() {
     const fleetNames = ['marveen', ...agentsRaw.map(a => a.name || a)]
       .filter(n => !CHAT_SYSTEM_AGENTS.has(n))
       .filter((n, i, arr) => arr.indexOf(n) === i)
+
+    // Populate avatar map from API data (hasAvatar field)
+    chatAgentHasAvatar.clear()
+    chatAgentHasAvatar.set('marveen', true) // main agent always has avatar endpoint
+    for (const a of agentsRaw) {
+      if (a.name) chatAgentHasAvatar.set(a.name, !!a.hasAvatar)
+    }
 
     // Build message index: agentName -> {lastMsg, count}
     const msgIndex = new Map()
