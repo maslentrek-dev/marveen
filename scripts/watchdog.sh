@@ -6,6 +6,10 @@ INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="$INSTALL_DIR/logs/watchdog.log"
 mkdir -p "$INSTALL_DIR/logs"
 
+# Dashboard port: config-driven (.env WEB_PORT), default 3420.
+[ -f "$INSTALL_DIR/.env" ] && WEB_PORT="$(grep -E '^WEB_PORT=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
+WEB_PORT="${WEB_PORT:-3420}"
+
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
 
@@ -30,7 +34,7 @@ replay_unfinished_messages() {
 
   RESPONSE=$(curl -s -m 5 \
     -H "Authorization: Bearer $TOKEN" \
-    "http://localhost:3420/api/messages?to=${AGENT_ID}&limit=200" 2>/dev/null) || return
+    "http://localhost:${WEB_PORT}/api/messages?to=${AGENT_ID}&limit=200" 2>/dev/null) || return
 
   [ -z "$RESPONSE" ] || [ "$RESPONSE" = "[]" ] && return
 
