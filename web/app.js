@@ -90,6 +90,7 @@ function switchPage(pageId) {
   if (pageId === 'skills') loadGlobalSkills()
   if (pageId === 'connectors') loadConnectors()
   if (pageId === 'migrate') loadMigrateAgents()
+  if (pageId === 'docs') loadDocs()
   if (pageId === 'status') loadStatus()
   if (pageId === 'recall') loadRecallPage()
   if (pageId === 'bgTasks') loadBgTasksPage()
@@ -9561,7 +9562,7 @@ function openTerminalModal(agentName) {
     fontSize: 12,
     cursorBlink: false,
     disableStdin: false,
-    scrollback: 500,
+    scrollback: 4000,
     convertEol: true,
     allowProposedApi: true,
   })
@@ -9575,31 +9576,55 @@ function openTerminalModal(agentName) {
   openModal(overlay)
   setTimeout(() => term.focus(), 50)
 
-  // SSE pane stream
+  // SSE pane stream.
+  // The pane snapshot now includes scrollback history (server uses
+  // `capture-pane -S -2000`), so the user can scroll back. To keep scrolling
+  // stable we (a) only repaint when the snapshot actually changed, and (b) only
+  // repaint while the viewport is at the bottom — if the user has scrolled up we
+  // freeze their view and resume painting when they return to the bottom (the
+  // onScroll handler below). The repaint clears the scrollback (CSI 3 J) before
+  // rewriting the full snapshot so frames don't accumulate duplicate history.
+  let latestPane = null
+  let paintedPane = null
+  const isAtBottom = () => {
+    const buf = term.buffer.active
+    return buf.viewportY >= buf.baseY
+  }
+  const repaint = () => {
+    if (latestPane === null || latestPane === paintedPane) return
+    if (!isAtBottom()) return // user scrolled up — keep their view put
+    paintedPane = latestPane
+    term.write('\x1b[3J\x1b[2J\x1b[H' + latestPane)
+  }
   const token = localStorage.getItem('marveen-dashboard-token') || ''
   const sse = new EventSource(`/api/agents/${encodeURIComponent(agentName)}/pane/stream?token=${encodeURIComponent(token)}`)
   sse.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data)
       if (msg.pane !== undefined) {
-        const clean = msg.pane.replace(/\x1b]8;[^\x1b]*\x1b\\/g, '')
-        term.write('\x1b[2J\x1b[H' + clean)
+        latestPane = msg.pane.replace(/\x1b]8;[^\x1b]*\x1b\\/g, '')
+        repaint()
       }
     } catch {}
   }
   sse.onerror = () => term.write('\r\n[stream hiba vagy leállva]\r\n')
   terminalSSE = sse
+  // When the user scrolls back down to the bottom, resume live repainting.
+  term.onScroll(() => { if (isAtBottom()) repaint() })
 
   // Single onData handler — maps escape sequences to {special}, plain chars to {keys}
-  // Using onData only (no onKey) avoids double-firing on arrow/Enter keys
+  // Using onData only (no onKey) avoids double-firing on arrow/Enter keys.
+  // PageUp/PageDown are intentionally NOT forwarded: they scroll the xterm
+  // scrollback locally (history viewing) instead of going to the agent.
   const ESC_TO_SPECIAL = {
     '\r': 'Enter', '\x1b': 'Escape',
     '\x1b[A': 'Up', '\x1b[B': 'Down', '\x1b[C': 'Right', '\x1b[D': 'Left',
     '\x7f': 'BSpace', '\t': 'Tab', '\x1b[Z': 'S-Tab',
     '\x03': 'C-c', '\x04': 'C-d', '\x15': 'C-u', '\x0c': 'C-l',
-    '\x1b[5~': 'PageUp', '\x1b[6~': 'PageDown',
   }
   term.onData(data => {
+    if (data === '\x1b[5~') { term.scrollPages(-1); return } // PageUp -> scroll history up
+    if (data === '\x1b[6~') { term.scrollPages(1); return }  // PageDown -> scroll history down
     const special = ESC_TO_SPECIAL[data]
     const body = special ? { special } : { keys: data }
     fetch(`/api/agents/${encodeURIComponent(agentName)}/keys`, {
@@ -9634,3 +9659,138 @@ document.getElementById('terminalClose')?.addEventListener('click', () => {
   window.addEventListener('hashchange', routeFromHash)
   routeFromHash()
 })()
+
+// ============================================================
+// === Docs (read-only viewer for the project's docs/ folder) ===
+// ============================================================
+
+function escapeAttr(s) {
+  return escapeHtml(String(s)).replace(/"/g, '&quot;')
+}
+
+// Minimal, dependency-free Markdown -> HTML renderer. Inputs come from the
+// repo's own docs/ folder (trusted), but we HTML-escape everything anyway and
+// only emit a fixed set of tags. Covers the constructs our docs use: fenced
+// code, headings, hr, tables, ordered/unordered lists, blockquotes, paragraphs,
+// and inline code/bold/italic/links.
+function mdInline(text) {
+  let s = escapeHtml(text)
+  s = s.replace(/`([^`]+)`/g, (m, c) => '<code>' + c + '</code>')
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>')
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, txt, url) =>
+    '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener noreferrer">' + txt + '</a>')
+  return s
+}
+
+function renderMarkdown(md) {
+  const lines = String(md).replace(/\r\n/g, '\n').split('\n')
+  const out = []
+  let i = 0
+  const isBlockStart = (l) =>
+    /^```/.test(l) || /^(#{1,6})\s/.test(l) || /^\s*[-*]\s+/.test(l) ||
+    /^\s*\d+\.\s+/.test(l) || /^\s*\|.*\|\s*$/.test(l) || /^\s*>\s?/.test(l) ||
+    /^\s*([-*_])\1{2,}\s*$/.test(l) || /^\s*$/.test(l)
+  while (i < lines.length) {
+    const line = lines[i]
+    const fence = line.match(/^```(\w*)\s*$/)
+    if (fence) {
+      const code = []
+      i++
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) { code.push(lines[i]); i++ }
+      i++
+      out.push('<pre><code>' + escapeHtml(code.join('\n')) + '</code></pre>')
+      continue
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/)
+    if (h) { const lvl = h[1].length; out.push('<h' + lvl + '>' + mdInline(h[2].trim()) + '</h' + lvl + '>'); i++; continue }
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { out.push('<hr>'); i++; continue }
+    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length &&
+        /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+      const parseRow = (r) => r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim())
+      const headers = parseRow(line)
+      i += 2
+      const rows = []
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(parseRow(lines[i])); i++ }
+      let t = '<table><thead><tr>' + headers.map(c => '<th>' + mdInline(c) + '</th>').join('') + '</tr></thead><tbody>'
+      for (const r of rows) t += '<tr>' + r.map(c => '<td>' + mdInline(c) + '</td>').join('') + '</tr>'
+      t += '</tbody></table>'
+      out.push(t)
+      continue
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      const items = []
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*[-*]\s+/, '')); i++ }
+      out.push('<ul>' + items.map(it => '<li>' + mdInline(it) + '</li>').join('') + '</ul>')
+      continue
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const items = []
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*\d+\.\s+/, '')); i++ }
+      out.push('<ol>' + items.map(it => '<li>' + mdInline(it) + '</li>').join('') + '</ol>')
+      continue
+    }
+    if (/^\s*>\s?/.test(line)) {
+      const q = []
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) { q.push(lines[i].replace(/^\s*>\s?/, '')); i++ }
+      out.push('<blockquote>' + q.map(mdInline).join('<br>') + '</blockquote>')
+      continue
+    }
+    if (/^\s*$/.test(line)) { i++; continue }
+    const para = []
+    while (i < lines.length && !isBlockStart(lines[i])) { para.push(lines[i]); i++ }
+    if (para.length) out.push('<p>' + para.map(mdInline).join('<br>') + '</p>')
+  }
+  return out.join('\n')
+}
+
+async function loadDocs() {
+  const listEl = document.getElementById('docsList')
+  const contentEl = document.getElementById('docsContent')
+  if (!listEl) return
+  listEl.innerHTML = '<p class="muted">Betöltés...</p>'
+  let docs = []
+  try {
+    const res = await fetch('/api/docs')
+    docs = await res.json()
+    if (!Array.isArray(docs)) docs = []
+  } catch (e) {
+    listEl.innerHTML = '<p class="muted">Nem sikerült betölteni a listát: ' + escapeHtml(String(e.message || e)) + '</p>'
+    return
+  }
+  if (!docs.length) {
+    listEl.innerHTML = '<p class="muted">Nincs dokumentum a docs/ mappában.</p>'
+    if (contentEl) contentEl.innerHTML = '<p class="muted">Nincs megjeleníthető dokumentum.</p>'
+    return
+  }
+  listEl.innerHTML = docs.map(d =>
+    '<a href="#" class="docs-list-item" data-doc="' + escapeAttr(d.name) + '">' +
+      '<span class="docs-list-title">' + escapeHtml(d.title || d.name) + '</span>' +
+      (d.created ? '<span class="docs-list-date">' + escapeHtml(d.created) + '</span>' : '') +
+    '</a>'
+  ).join('')
+  listEl.querySelectorAll('.docs-list-item').forEach(a => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault()
+      listEl.querySelectorAll('.docs-list-item').forEach(x => x.classList.remove('active'))
+      a.classList.add('active')
+      openDoc(a.dataset.doc)
+    })
+  })
+  const first = listEl.querySelector('.docs-list-item')
+  if (first) { first.classList.add('active'); openDoc(first.dataset.doc) }
+}
+
+async function openDoc(name) {
+  const contentEl = document.getElementById('docsContent')
+  if (!contentEl) return
+  contentEl.innerHTML = '<p class="muted">Betöltés...</p>'
+  try {
+    const res = await fetch('/api/docs/' + encodeURIComponent(name))
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const doc = await res.json()
+    contentEl.innerHTML = renderMarkdown(doc.content || '')
+  } catch (e) {
+    contentEl.innerHTML = '<p class="muted">Nem sikerült megnyitni: ' + escapeHtml(String(e.message || e)) + '</p>'
+  }
+}
