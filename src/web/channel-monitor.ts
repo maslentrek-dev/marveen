@@ -174,6 +174,25 @@ function recoverStuckInputForSession(
   return decision.next
 }
 
+// Periodic detached-channel-claude reap (CB6CF755 durable fix). The pane-
+// attribution reaper (reapDetachedChannelClaudes) already runs at RESPAWN time
+// (resumeMarveenSession + agent (re)start), but orphans that accumulate BETWEEN
+// respawns -- a --continue respawn that failed to tear down its predecessor --
+// linger until the next respawn happens to fire (the "5 orphans over 13 days"
+// leak). Running the same reaper on a slow cadence here closes that gap. The
+// reaper is fail-safe (no live panes resolved -> reaps nothing) and pane-
+// guarded, so a live agent/main session can never be hit. Throttled so the
+// ps/tmux snapshot is not taken on every 60s tick.
+const DETACHED_REAP_INTERVAL_MS = 10 * 60 * 1000
+// Initialised to load time so the first periodic reap fires ~10min after boot,
+// letting startup settle (the respawn-time reap already covers boot itself).
+let lastDetachedReapAt = Date.now()
+
+// Pure: is it time to run the periodic reap again? Exported for test.
+export function shouldRunPeriodicReap(lastAt: number, now: number, intervalMs: number): boolean {
+  return now - lastAt >= intervalMs
+}
+
 // Per-session tracking for the wedged thinking-block error (a Claude
 // session stuck returning `400 ... thinking blocks cannot be modified`
 // on every prompt). detectPaneState() classifies such a pane as
@@ -995,6 +1014,21 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     // loop above only handles sessions that still exist with a dead plugin.
     // Staggered to avoid the simultaneous-start race that kills agents.
     void reconcileDesiredAgents()
+
+    // Periodic detached-channel-claude reap (CB6CF755). Throttled; reuses the
+    // respawn-time reaper so orphans accumulating between respawns are cleaned
+    // up on a slow cadence too. Fail-safe + pane-guarded inside the reaper.
+    if (shouldRunPeriodicReap(lastDetachedReapAt, Date.now(), DETACHED_REAP_INTERVAL_MS)) {
+      lastDetachedReapAt = Date.now()
+      try {
+        const reaped = reapDetachedChannelClaudes({ tmuxPath: TMUX })
+        if (reaped.length > 0) {
+          logger.warn({ reaped }, 'channel-monitor: periodic reap removed detached channel-claude orphans')
+        }
+      } catch (err) {
+        logger.warn({ err }, 'channel-monitor: periodic detached-claude reap failed')
+      }
+    }
   }
   setTimeout(check, 30000)
   return setInterval(check, 60000)
