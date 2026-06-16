@@ -9,8 +9,22 @@
       "Write(${AGENT_DIR}/**)",
       "Edit(${AGENT_DIR}/**)",
       "Read(${HOME}/Downloads/**)",
+      "Read(${HOME}/localdev/marveen/**)",
       "Bash(ls:*)",
       "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(jq:*)",
+      "Bash(wc:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(date:*)",
+      "Bash(sqlite3:*)",
+      "Bash(mkdir:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(curl:*)",
       "WebFetch(*)",
       "WebSearch(*)"
     ],
@@ -22,7 +36,6 @@
       "Read(**/.env)",
       "Bash(sudo:*)",
       "Bash(rm:*)",
-      "Bash(curl -X POST:*)",
       "Bash(git push:*)"
     ]
   }
