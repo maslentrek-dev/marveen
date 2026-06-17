@@ -776,6 +776,70 @@ main {
 }
 .kanban-card-due.overdue { color: var(--danger); font-weight: 600; }
 
+.kanban-card-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.kanban-card-label-pill {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  color: var(--label-color);
+  background: color-mix(in srgb, var(--label-color) 16%, transparent);
+  cursor: pointer;
+  line-height: 1.5;
+}
+.kanban-card-label-pill:hover { filter: brightness(1.15); }
+.kanban-card-label-overflow {
+  color: var(--text-muted);
+  background: var(--bg);
+  cursor: default;
+}
+.kanban-card-label-overflow:hover { filter: none; }
+
+.kanban-quick-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  /* Inactive chips already carry their label's own colour (border + text +
+     faint tint), so the header filter row visually matches the per-card label
+     pills on the board; the active state below fills solid. */
+  border: 1px solid var(--chip-color);
+  color: var(--chip-color);
+  background: color-mix(in srgb, var(--chip-color) 12%, var(--bg-card));
+  cursor: pointer;
+  user-select: none;
+}
+.kanban-quick-filter-chip:hover { border-color: var(--chip-color); }
+.kanban-quick-filter-chip.active {
+  color: white;
+  background: var(--chip-color);
+  border-color: var(--chip-color);
+}
+.kanban-quick-filter-count {
+  font-size: 10px;
+  opacity: 0.85;
+}
+.kanban-quick-filter-clear {
+  margin-left: 2px;
+  font-weight: 700;
+}
+.kanban-quick-filter-clear-all {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
 .priority-bar {
   width: 3px;
   height: 100%;
@@ -938,6 +1002,54 @@ main {
   white-space: pre-wrap;
 }
 .card-detail-desc:empty { display: none; }
+
+.card-detail-labels { margin-bottom: 20px; }
+.card-detail-labels h4 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+.label-pill-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 22px;
+}
+.label-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--label-color);
+  background: color-mix(in srgb, var(--label-color) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--label-color) 40%, transparent);
+}
+.label-pill-remove {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.7;
+}
+.label-pill-remove:hover { opacity: 1; }
+.label-color-swatches { display: flex; gap: 4px; }
+.label-color-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid transparent;
+}
+.label-color-swatch.selected { border-color: var(--text); }
 
 .card-detail-comments { margin-bottom: 20px; }
 .card-detail-comments h4 {

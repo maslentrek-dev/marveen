@@ -250,6 +250,15 @@ function renderActivity(entries) {
 let kanbanCards = []
 let kanbanAssignees = []
 let kanbanProjects = []
+// Label registry (id/name/color), independent of which cards currently carry
+// which labels -- card.labels (embedded by GET /api/kanban) holds that link.
+let kanbanAllLabels = []
+// Active label-filter ids -- the quick-filter chip row AND the per-card
+// footer label pills both toggle this same set (two entry points, one
+// filter dimension). OR-combined within itself (any active label matches),
+// AND-combined with the existing project/assignee filters. Persisted in
+// localStorage alongside the swimlane groupBy choice.
+let kanbanLabelFilter = new Set()
 let kanbanProjectFilter = ''
 // Assignee filter for the kanban board. '' = show all. Set via the
 // assignee dropdown / "Csak Gábor" toggle injected by setupAssigneeFilter().
@@ -292,7 +301,7 @@ async function loadKanban() {
     // Ensure the marveen config (kanbanAging + kanbanWip + kanbanSwimlanes) is
     // loaded even if the user opens the Kanban page first, before the Agents
     // page populated it.
-    if (!window._marveen?.kanbanAging || !window._marveen?.kanbanWip || !window._marveen?.kanbanSwimlanes) {
+    if (!window._marveen?.kanbanAging || !window._marveen?.kanbanWip || !window._marveen?.kanbanSwimlanes || !window._marveen?.kanbanLabels) {
       try {
         const mr = await fetch('/api/marveen')
         if (mr.ok) window._marveen = { ...(window._marveen || {}), ...(await mr.json()) }
@@ -313,15 +322,23 @@ async function loadKanban() {
         const sel = document.getElementById('kanbanGroupBy')
         if (sel) sel.value = initialGroup
       }
+      // Active label-filter selection, restored the same way as the groupBy
+      // choice -- a fresh page load should not lose the filters set up.
+      try {
+        const storedLabels = JSON.parse(localStorage.getItem('marveen.kanbanLabelFilter') || '[]')
+        if (Array.isArray(storedLabels)) kanbanLabelFilter = new Set(storedLabels)
+      } catch { /* ignore malformed storage */ }
     }
-    const [cardsRes, assigneesRes, projectsRes] = await Promise.all([
+    const [cardsRes, assigneesRes, projectsRes, labelsRes] = await Promise.all([
       fetch('/api/kanban'),
       fetch('/api/kanban/assignees'),
       fetch('/api/kanban-projects'),
+      fetch('/api/kanban/labels'),
     ])
     kanbanCards = await cardsRes.json()
     kanbanAssignees = await assigneesRes.json()
     kanbanProjects = await projectsRes.json()
+    kanbanAllLabels = await labelsRes.json()
     populateProjectFilter()
     populateProjectSuggestions()
     setupAssigneeFilter()
@@ -454,15 +471,85 @@ function setupAssigneeFilter() {
   syncOwnerFilterBtn()
 }
 
+// Project + assignee + label filters, independent of the priority quick-filter
+// Project + assignee filters only -- the baseline the label quick-filter
+// chip counts are computed against, independent of which labels are
+// currently active, so a chip's count stays meaningful whether it's the one
+// being toggled or not.
+function kanbanCardMatchesBaseFilters(card) {
+  if (kanbanProjectFilter && (card.project || '') !== kanbanProjectFilter) return false
+  const assigneeFilter = kanbanAssigneeFilter.toLowerCase()
+  if (assigneeFilter && String(card.assignee || '').trim().toLowerCase() !== assigneeFilter) return false
+  return true
+}
+
+// The label-filter dimension itself: a card matches when no label filter is
+// active, or when it carries at least one of the active labels (OR within
+// the dimension).
+function kanbanCardMatchesLabelFilter(card) {
+  if (kanbanLabelFilter.size === 0) return true
+  const cardLabelIds = (card.labels || []).map((l) => l.id)
+  return cardLabelIds.some((id) => kanbanLabelFilter.has(id))
+}
+
+// Shared by both the header quick-filter chips and the per-card footer label
+// pills -- one filter dimension, two entry points into the same toggle.
+function toggleKanbanLabelFilter(labelId) {
+  if (kanbanLabelFilter.has(labelId)) kanbanLabelFilter.delete(labelId)
+  else kanbanLabelFilter.add(labelId)
+  persistKanbanFilters()
+  renderKanban()
+}
+
+function clearKanbanQuickFilters() {
+  kanbanLabelFilter.clear()
+  persistKanbanFilters()
+  renderKanban()
+}
+
+function persistKanbanFilters() {
+  localStorage.setItem('marveen.kanbanLabelFilter', JSON.stringify([...kanbanLabelFilter]))
+}
+
+// Quick-filter chip row: one chip per defined label (not per priority), tinted
+// with that label's own colour. Clicking toggles the same kanbanLabelFilter
+// set the footer pills use.
+function renderKanbanQuickFilters() {
+  const row = document.getElementById('kanbanQuickFilters')
+  if (!row) return
+  row.innerHTML = ''
+  for (const label of kanbanAllLabels) {
+    const count = kanbanCards.filter((c) =>
+      kanbanCardMatchesBaseFilters(c) && (c.labels || []).some((l) => l.id === label.id)
+    ).length
+    const active = kanbanLabelFilter.has(label.id)
+    const chip = document.createElement('span')
+    chip.className = 'kanban-quick-filter-chip' + (active ? ' active' : '')
+    chip.dataset.labelId = label.id
+    chip.style.setProperty('--chip-color', label.color)
+    chip.innerHTML = `#${escapeHtml(label.name)} <span class="kanban-quick-filter-count">${count}</span>${active ? '<span class="kanban-quick-filter-clear">&times;</span>' : ''}`
+    chip.addEventListener('click', () => toggleKanbanLabelFilter(label.id))
+    row.appendChild(chip)
+  }
+  if (kanbanLabelFilter.size > 0) {
+    const clearAll = document.createElement('button')
+    clearAll.className = 'kanban-quick-filter-clear-all'
+    clearAll.textContent = 'Szűrők törlése'
+    clearAll.addEventListener('click', clearKanbanQuickFilters)
+    row.appendChild(clearAll)
+  }
+}
+
 function renderKanban() {
   const cardById = new Map(kanbanCards.map(c => [c.id, c]))
-  const assigneeFilter = kanbanAssigneeFilter.toLowerCase()
+
+  renderKanbanQuickFilters()
 
   // Determine which top-level cards are visible under current filters.
   const visibleCardIds = new Set()
   for (const card of kanbanCards) {
-    if (kanbanProjectFilter && (card.project || '') !== kanbanProjectFilter) continue
-    if (assigneeFilter && String(card.assignee || '').trim().toLowerCase() !== assigneeFilter) continue
+    if (!kanbanCardMatchesBaseFilters(card)) continue
+    if (!kanbanCardMatchesLabelFilter(card)) continue
     visibleCardIds.add(card.id)
   }
 
@@ -736,6 +823,22 @@ function createCardEl(card, embeddedChildren = []) {
     ? `<span class="kanban-card-project">${escapeHtml(card.project)}</span>`
     : ''
 
+  // Label footer pills: at most 3 shown + a "+N" overflow indicator. Each pill
+  // (except the overflow one) toggles that label into the active label-filter
+  // when clicked, mirroring the priority quick-filter chips above the board.
+  let labelsHtml = ''
+  if (Array.isArray(card.labels) && card.labels.length > 0) {
+    const shown = card.labels.slice(0, 3)
+    const overflow = card.labels.length - shown.length
+    const pills = shown.map((l) =>
+      `<span class="kanban-card-label-pill" data-label-id="${escapeHtml(l.id)}" style="--label-color:${escapeHtml(l.color)}" title="Szűrés: #${escapeHtml(l.name)}">#${escapeHtml(l.name)}</span>`
+    ).join('')
+    const overflowHtml = overflow > 0
+      ? `<span class="kanban-card-label-pill kanban-card-label-overflow" title="${overflow} további címke">+${overflow}</span>`
+      : ''
+    labelsHtml = `<div class="kanban-card-labels">${pills}${overflowHtml}</div>`
+  }
+
   const seqHtml = card.seq != null
     ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--muted);margin-right:5px">#${card.seq}</span>`
     : ''
@@ -784,6 +887,7 @@ function createCardEl(card, embeddedChildren = []) {
     ${projectHtml}
     <div class="kanban-card-title">${seqHtml}${escapeHtml(card.title)}</div>
     <div class="kanban-card-footer">${assigneeHtml}${dueHtml}</div>
+    ${labelsHtml}
     <div class="kanban-card-actions">
       <button class="card-breakdown-btn" title="AI szétbont" aria-label="AI szétbont">⚡</button>
     </div>
@@ -796,6 +900,14 @@ function createCardEl(card, embeddedChildren = []) {
   el.querySelector('.card-breakdown-btn').addEventListener('click', (e) => {
     e.stopPropagation()
     triggerBreakdown(card)
+  })
+
+  // Label pills -> toggle that label into the active filter (don't open detail)
+  el.querySelectorAll('.kanban-card-label-pill[data-label-id]').forEach((pillEl) => {
+    pillEl.addEventListener('click', (e) => {
+      e.stopPropagation()
+      toggleKanbanLabelFilter(pillEl.dataset.labelId)
+    })
   })
 
   // Click on embedded subtask -> open that subtask's detail (don't bubble to parent)
@@ -960,6 +1072,106 @@ document.getElementById('saveCardBtn').addEventListener('click', async () => {
   }
 })
 
+// === Card labels (in the detail modal) ===
+// Always re-fetches the card's own labels via the dedicated endpoint instead
+// of trusting card.labels -- callers that pass a card object sourced from
+// /api/kanban/:id/children (subtask list) don't have labels embedded, only
+// the bulk board listing (/api/kanban) does.
+async function renderCardLabelsSection(card) {
+  const listEl = document.getElementById('cardLabelList')
+  const addSelect = document.getElementById('cardLabelAdd')
+  const newBtn = document.getElementById('cardLabelNewBtn')
+  const newForm = document.getElementById('cardLabelNewForm')
+  const newNameInput = document.getElementById('cardLabelNewName')
+  const newColorsEl = document.getElementById('cardLabelNewColors')
+  const newSaveBtn = document.getElementById('cardLabelNewSaveBtn')
+
+  let attached = []
+  try {
+    attached = await (await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels`)).json()
+  } catch { /* leave empty -- pill list just stays blank */ }
+
+  listEl.innerHTML = ''
+  for (const label of attached) {
+    const pill = document.createElement('span')
+    pill.className = 'label-pill'
+    pill.style.setProperty('--label-color', label.color)
+    pill.innerHTML = `#${escapeHtml(label.name)} <button class="label-pill-remove" title="Címke eltávolítása" aria-label="Címke eltávolítása">&times;</button>`
+    pill.querySelector('.label-pill-remove').addEventListener('click', async () => {
+      try {
+        await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels/${encodeURIComponent(label.id)}`, { method: 'DELETE' })
+        renderCardLabelsSection(card)
+        loadKanban()
+      } catch { showToast('Hiba a címke eltávolításakor') }
+    })
+    listEl.appendChild(pill)
+  }
+
+  const attachedIds = new Set(attached.map((l) => l.id))
+  addSelect.innerHTML = '<option value="">-- Meglévő címke hozzáadása --</option>'
+  for (const label of kanbanAllLabels) {
+    if (attachedIds.has(label.id)) continue
+    const opt = document.createElement('option')
+    opt.value = label.id
+    opt.textContent = label.name
+    addSelect.appendChild(opt)
+  }
+  addSelect.onchange = async () => {
+    const labelId = addSelect.value
+    if (!labelId) return
+    try {
+      await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labelId }),
+      })
+      renderCardLabelsSection(card)
+      loadKanban()
+    } catch { showToast('Hiba a címke hozzáadásakor') }
+  }
+
+  newForm.style.display = 'none'
+  newBtn.onclick = () => {
+    newForm.style.display = newForm.style.display === 'none' ? '' : 'none'
+    newNameInput.value = ''
+  }
+
+  const palette = window._marveen?.kanbanLabels?.colors || ['#64748b']
+  newColorsEl.innerHTML = ''
+  let selectedColor = palette[0]
+  palette.forEach((color, i) => {
+    const sw = document.createElement('span')
+    sw.className = 'label-color-swatch' + (i === 0 ? ' selected' : '')
+    sw.style.background = color
+    sw.addEventListener('click', () => {
+      selectedColor = color
+      newColorsEl.querySelectorAll('.label-color-swatch').forEach((s) => s.classList.remove('selected'))
+      sw.classList.add('selected')
+    })
+    newColorsEl.appendChild(sw)
+  })
+
+  newSaveBtn.onclick = async () => {
+    const name = newNameInput.value.trim()
+    if (!name) { newNameInput.focus(); return }
+    try {
+      const r = await fetch('/api/kanban/labels', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, color: selectedColor }),
+      })
+      if (!r.ok) { showToast('Hiba a címke létrehozásakor'); return }
+      const newLabel = await r.json()
+      kanbanAllLabels.push(newLabel)
+      await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labelId: newLabel.id }),
+      })
+      newForm.style.display = 'none'
+      renderCardLabelsSection(card)
+      loadKanban()
+    } catch { showToast('Hiba a címke létrehozásakor') }
+  }
+}
+
 // === Card detail ===
 async function showCardDetail(card) {
   // Running number (#N) in the title bar, plus the stable hex id in the meta.
@@ -1054,6 +1266,8 @@ async function showCardDetail(card) {
   })
 
   document.getElementById('cardDetailDesc').textContent = card.description || ''
+
+  renderCardLabelsSection(card)
 
   // #115: Parent meta row — dropdown replaces the old read-only display; shown only when editable
   const parentMetaItem = document.getElementById('parentMetaItem')
