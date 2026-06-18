@@ -76,7 +76,14 @@ themeToggle.addEventListener('click', () => {
 const navLinks = document.querySelectorAll('.sb-link[data-page], .nav-link[data-page]')
 const pages = document.querySelectorAll('.page')
 
+function confirmSettingsLeave() {
+  if (settingsDirty.size === 0) return true
+  return window.confirm('Nem mentett beállítások maradnak. Biztosan el akarsz navigálni?')
+}
+
 function switchPage(pageId) {
+  // Guard unsaved settings before leaving the settings page
+  if (!document.getElementById('settingsPage').hidden && pageId !== 'settings' && !confirmSettingsLeave()) return
   pages.forEach((p) => (p.hidden = p.id !== pageId + 'Page'))
   navLinks.forEach((l) => l.classList.toggle('active', l.dataset.page === pageId))
   // Kanban needs full-width layout (overrides main's max-width: 1200px)
@@ -106,6 +113,8 @@ function switchPage(pageId) {
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'ideas') loadIdeasPage()
+  if (pageId === 'archived') loadArchivedPage()
+  if (pageId === 'naplo') loadNaplo()
 }
 
 // Mobile off-canvas sidebar toggle. No-op visual effect on desktop (the
@@ -1498,6 +1507,8 @@ async function showCardDetail(card) {
       breakdownCardId = card.id
       breakdownSubtasks = data.subtasks
       showBreakdownModal(data.subtasks, card)
+      const dodSec = document.getElementById('breakdownDoDSection')
+      if (dodSec) dodSec.style.display = 'none'
     } catch (err) {
       showToast('Breakdown hiba')
     } finally {
@@ -1583,10 +1594,11 @@ document.getElementById('breakdownAcceptBtn').addEventListener('click', async ()
   if (accepted.length === 0) { showToast('Válassz legalább egy alfeladatot'); return }
   try {
     if (breakdownMode === 'idea') {
+      const successCriteria = document.getElementById('breakdownSuccessCriteria')?.value.trim() || undefined
       const res = await fetch(`/api/ideas/${encodeURIComponent(breakdownIdeaId)}/promote-breakdown`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subtasks: accepted }),
+        body: JSON.stringify({ subtasks: accepted, success_criteria: successCriteria }),
       })
       const data = await res.json()
       if (!res.ok) { showToast(data.error || 'Hiba'); return }
@@ -9366,18 +9378,45 @@ async function setAutonomyLevel(key, level) {
 // ============================================================
 
 document.getElementById('refreshSettingsBtn').addEventListener('click', loadSettings)
+window.addEventListener('beforeunload', (e) => {
+  if (settingsDirty.size > 0) { e.preventDefault(); e.returnValue = '' }
+})
 
 // Human label for a registry "module" -- falls back to a capitalised key for
 // any future module the UI doesn't know about yet, so adding a registry
 // entry never requires a frontend change just to render a sane heading.
-const SETTINGS_MODULE_LABELS = { kanban: 'Kanban' }
+const SETTINGS_MODULE_LABELS = { kanban: 'Kanban', system: 'Rendszer', heartbeat: 'Heartbeat', ideabox: 'Ötletláda' }
 function settingsModuleLabel(mod) {
   return SETTINGS_MODULE_LABELS[mod] || (mod.charAt(0).toUpperCase() + mod.slice(1))
+}
+
+// Track dirty state: key -> { input, originalValue, type, errorEl }
+const settingsDirty = new Map()
+
+function updateSettingsSaveBar() {
+  const bar = document.getElementById('settingsSaveBar')
+  const countEl = document.getElementById('settingsDirtyCount')
+  if (!bar) return
+  const n = settingsDirty.size
+  bar.style.display = n > 0 ? 'flex' : 'none'
+  if (countEl) countEl.textContent = n === 1 ? '1 módosított beállítás' : `${n} módosított beállítás`
+}
+
+function markSettingDirty(key, input, originalValue, type, errorEl) {
+  const currentVal = type === 'color' ? input.value : input.value
+  if (currentVal === String(originalValue)) {
+    settingsDirty.delete(key)
+  } else {
+    settingsDirty.set(key, { input, originalValue, type, errorEl })
+  }
+  updateSettingsSaveBar()
 }
 
 async function loadSettings() {
   const container = document.getElementById('settingsGroups')
   container.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Betöltés...</p>'
+  settingsDirty.clear()
+  updateSettingsSaveBar()
 
   try {
     const res = await fetch('/api/settings')
@@ -9455,6 +9494,7 @@ function buildSettingRow(def) {
   const editor = document.createElement('div')
   editor.className = 'settings-row-editor'
 
+  const originalValue = String(def.value)
   let valueInput
   if (Array.isArray(def.valueSet) && def.valueSet.length) {
     valueInput = document.createElement('select')
@@ -9465,7 +9505,7 @@ function buildSettingRow(def) {
       o.textContent = opt
       valueInput.appendChild(o)
     }
-    valueInput.value = String(def.value)
+    valueInput.value = originalValue
   } else if (def.type === 'color') {
     valueInput = document.createElement('input')
     valueInput.type = 'color'
@@ -9484,42 +9524,79 @@ function buildSettingRow(def) {
     valueInput.className = 'input'
     valueInput.value = def.value
   }
+  valueInput.dataset.settingKey = def.key
+  valueInput.dataset.settingType = def.type
+  valueInput.dataset.originalValue = originalValue
   editor.appendChild(valueInput)
-
-  const saveBtn = document.createElement('button')
-  saveBtn.className = 'btn-primary btn-compact'
-  saveBtn.textContent = 'Mentés'
-  editor.appendChild(saveBtn)
 
   const errorEl = document.createElement('div')
   errorEl.className = 'settings-row-error'
   editor.appendChild(errorEl)
 
-  saveBtn.addEventListener('click', () => saveSetting(def.key, valueInput, errorEl, def.type))
+  valueInput.addEventListener('input', () => markSettingDirty(def.key, valueInput, originalValue, def.type, errorEl))
+  valueInput.addEventListener('change', () => markSettingDirty(def.key, valueInput, originalValue, def.type, errorEl))
 
   row.appendChild(editor)
   return row
 }
 
-async function saveSetting(key, inputEl, errorEl, type) {
-  errorEl.textContent = ''
-  const raw = type === 'int' ? Number(inputEl.value) : inputEl.value
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, value: raw }),
-    })
-    const data = await res.json().catch(() => ({}))
-    if (!res.ok) {
-      errorEl.textContent = data.error || 'Hiba a mentésnél'
-      return
+async function saveAllSettings() {
+  if (settingsDirty.size === 0) return
+  const btn = document.getElementById('settingsSaveAllBtn')
+  if (btn) { btn.disabled = true; btn.textContent = 'Mentés...' }
+
+  const errors = []
+  let needsRestart = false
+
+  for (const [key, { input, type, errorEl }] of settingsDirty) {
+    errorEl.textContent = ''
+    const raw = type === 'int' ? Number(input.value) : input.value
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, value: raw }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        errorEl.textContent = data.error || 'Hiba'
+        errors.push(`${key}: ${data.error || 'hiba'}`)
+      } else {
+        input.dataset.originalValue = String(raw)
+        if (data.requiresRestart) needsRestart = true
+      }
+    } catch {
+      errorEl.textContent = 'Kapcsolati hiba'
+      errors.push(`${key}: kapcsolati hiba`)
     }
-    showToast(data.requiresRestart ? 'Mentve -- újraindítás szükséges az életbe lépéshez' : 'Mentve')
-  } catch {
-    errorEl.textContent = 'Hiba a mentésnél (kapcsolat)'
+  }
+
+  // Remove successfully saved keys from dirty map
+  for (const [key, { input }] of settingsDirty) {
+    if (String(input.value) === input.dataset.originalValue) settingsDirty.delete(key)
+  }
+  updateSettingsSaveBar()
+
+  if (btn) { btn.disabled = false; btn.textContent = 'Mentés' }
+  if (errors.length) {
+    showToast('Néhány beállítás nem mentődött el', 'error')
+  } else {
+    showToast(needsRestart ? 'Mentve -- újraindítás szükséges az életbe lépéshez' : 'Mentve')
   }
 }
+
+function resetAllSettings() {
+  for (const [key, { input, originalValue }] of settingsDirty) {
+    input.value = originalValue
+    const errorEl = document.querySelector(`[data-setting-key="${key}"]`)?.closest('.settings-row')?.querySelector('.settings-row-error')
+    if (errorEl) errorEl.textContent = ''
+  }
+  settingsDirty.clear()
+  updateSettingsSaveBar()
+}
+
+document.getElementById('settingsSaveAllBtn')?.addEventListener('click', saveAllSettings)
+document.getElementById('settingsResetBtn')?.addEventListener('click', resetAllSettings)
 
 // === connectors.hu install banner ===
 ;(function () {
@@ -10325,17 +10402,20 @@ window.addEventListener('resize', () => {
 let ideas = []
 let ideasPromoteId = null
 let ideaEditId = null
+let ideaDetailId = null
 const STATUS_COLORS = { new: 'var(--accent)', reviewed: '#f59e0b', kanban: '#22c55e', rejected: '#ef4444' }
 const STATUS_LABELS = { new: 'Új', reviewed: 'Átnézve', kanban: 'Kanbanban', rejected: 'Elutasítva' }
 
 async function loadIdeasPage() {
-  const statusFilter = document.getElementById('ideaStatusFilter')?.value || ''
+  const statusFilter = document.getElementById('ideaStatusFilter')?.value ?? 'active'
   const categoryFilter = document.getElementById('ideaCategoryFilter')?.value || ''
   const params = new URLSearchParams()
-  if (statusFilter) params.set('status', statusFilter)
+  // 'active' = new+reviewed, fetched unfiltered then narrowed client-side
+  if (statusFilter && statusFilter !== 'active') params.set('status', statusFilter)
   if (categoryFilter) params.set('category', categoryFilter)
   const [ideasRes, catsRes] = await Promise.all([fetch('/api/ideas?' + params), fetch('/api/ideas/categories')])
   ideas = await ideasRes.json()
+  if (statusFilter === 'active') ideas = ideas.filter(i => i.status === 'new' || i.status === 'reviewed')
   const cats = await catsRes.json()
   const catSel = document.getElementById('ideaCategoryFilter')
   if (catSel) {
@@ -10375,16 +10455,26 @@ function renderIdeasList() {
     </div>`).join('')
 }
 
+function ideaScoreBadge(idea) {
+  if (!idea.impact || !idea.effort) return ''
+  const score = idea.impact - idea.effort
+  const color = score > 0 ? '#22c55e' : score < 0 ? '#ef4444' : 'var(--text-muted)'
+  return `<span style="font-size:11px;color:${color};border:1px solid ${color};border-radius:4px;padding:2px 5px" title="Impact ${idea.impact} - Effort ${idea.effort}">I${idea.impact}·E${idea.effort}</span>`
+}
+
 function renderIdeaCard(idea) {
   const statusColor = STATUS_COLORS[idea.status] || 'var(--text-muted)'
   const statusLabel = STATUS_LABELS[idea.status] || idea.status
-  const desc = idea.description ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${escapeHtml(idea.description)}</div>` : ''
-  return `<div class="card" style="padding:12px 16px;margin-bottom:4px">
+  const desc = idea.description ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${escapeHtml(idea.description.slice(0, 120))}${idea.description.length > 120 ? '…' : ''}</div>` : ''
+  const staleBadge = idea.stale ? `<span style="font-size:11px;background:#92400e22;color:#d97706;border:1px solid #d97706;border-radius:4px;padding:2px 5px" title="Régi ötlet, nézd át!">⏰ Elavult</span>` : ''
+  return `<div class="card" style="padding:12px 16px;margin-bottom:4px${idea.stale ? ';border-left:3px solid #d97706' : ''}">
     <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
-      <div style="flex:1">
-        <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-weight:600;font-size:14px">${escapeHtml(idea.title)}</span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="idea-title-link" style="font-weight:600;font-size:14px;cursor:pointer" onclick="openIdeaDetail('${idea.id}')">${escapeHtml(idea.title)}</span>
           <span style="font-size:11px;color:${statusColor};padding:2px 6px;border:1px solid ${statusColor};border-radius:4px">${statusLabel}</span>
+          ${ideaScoreBadge(idea)}
+          ${staleBadge}
         </div>
         ${desc}
       </div>
@@ -10416,13 +10506,24 @@ function openIdeaEdit(id) {
   document.getElementById('ideaTitleInput').value = idea.title
   document.getElementById('ideaDescInput').value = idea.description || ''
   document.getElementById('ideaCategoryInput').value = idea.category
+  document.getElementById('ideaImpactInput').value = idea.impact ?? ''
+  document.getElementById('ideaEffortInput').value = idea.effort ?? ''
   openModal(document.getElementById('ideaModalOverlay'))
 }
 
 async function saveIdea() {
   const title = document.getElementById('ideaTitleInput').value.trim()
   if (!title) { showToast('Cím kötelező', 'error'); return }
-  const body = { title, description: document.getElementById('ideaDescInput').value.trim() || undefined, category: document.getElementById('ideaCategoryInput').value, source: 'manual' }
+  const impactRaw = document.getElementById('ideaImpactInput').value
+  const effortRaw = document.getElementById('ideaEffortInput').value
+  const body = {
+    title,
+    description: document.getElementById('ideaDescInput').value.trim() || undefined,
+    category: document.getElementById('ideaCategoryInput').value,
+    source: 'manual',
+    impact: impactRaw ? parseInt(impactRaw) : null,
+    effort: effortRaw ? parseInt(effortRaw) : null,
+  }
   if (ideaEditId) {
     await fetch(`/api/ideas/${ideaEditId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   } else {
@@ -10437,6 +10538,112 @@ async function deleteIdeaItem(id) {
   await fetch(`/api/ideas/${id}`, { method: 'DELETE' })
   loadIdeasPage()
 }
+
+// --- Idea detail modal (comments + impact/effort view) ---
+
+async function openIdeaDetail(id) {
+  const idea = ideas.find(i => i.id === id)
+  if (!idea) return
+  ideaDetailId = id
+  const statusLabel = STATUS_LABELS[idea.status] || idea.status
+  document.getElementById('ideaDetailTitle').textContent = idea.title
+  document.getElementById('ideaDetailMeta').textContent = `${idea.category} · ${statusLabel}`
+  document.getElementById('ideaDetailDesc').textContent = idea.description || '(nincs leírás)'
+  document.getElementById('ideaDetailImpact').value = idea.impact ?? ''
+  document.getElementById('ideaDetailEffort').value = idea.effort ?? ''
+  updateDetailScoreChip()
+  document.getElementById('ideaCommentsList').innerHTML = ''
+  document.getElementById('ideaCommentContent').value = ''
+  openModal(document.getElementById('ideaDetailOverlay'))
+  await loadIdeaComments(id)
+}
+
+function updateDetailScoreChip() {
+  const chip = document.getElementById('ideaDetailScoreChip')
+  if (!chip) return
+  const impact = Number(document.getElementById('ideaDetailImpact').value) || 0
+  const effort = Number(document.getElementById('ideaDetailEffort').value) || 0
+  if (!impact && !effort) { chip.textContent = ''; return }
+  if (!impact || !effort) { chip.textContent = ''; return }
+  const score = impact - effort
+  const color = score > 0 ? '#22c55e' : score < 0 ? '#ef4444' : 'var(--text-muted)'
+  chip.innerHTML = `<span class="idea-score-chip" style="border-color:${color};color:${color}">Pont: <strong>${score >= 0 ? '+' : ''}${score}</strong></span>`
+}
+
+document.getElementById('ideaDetailImpact')?.addEventListener('change', updateDetailScoreChip)
+document.getElementById('ideaDetailEffort')?.addEventListener('change', updateDetailScoreChip)
+
+document.getElementById('ideaDetailScoreSave')?.addEventListener('click', async () => {
+  if (!ideaDetailId) return
+  const impact = document.getElementById('ideaDetailImpact').value
+  const effort = document.getElementById('ideaDetailEffort').value
+  try {
+    const res = await fetch(`/api/ideas/${encodeURIComponent(ideaDetailId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        impact: impact ? Number(impact) : null,
+        effort: effort ? Number(effort) : null,
+      }),
+    })
+    if (!res.ok) { showToast('Mentés hiba', 'error'); return }
+    // update local cache so card chip refreshes on close
+    const idea = ideas.find(i => i.id === ideaDetailId)
+    if (idea) {
+      idea.impact = impact ? Number(impact) : null
+      idea.effort = effort ? Number(effort) : null
+    }
+    updateDetailScoreChip()
+    showToast('Pontozás mentve')
+    renderIdeasList()
+  } catch { showToast('Mentés hiba', 'error') }
+})
+
+async function loadIdeaComments(id) {
+  const list = document.getElementById('ideaCommentsList')
+  try {
+    const res = await fetch(`/api/ideas/${encodeURIComponent(id)}/comments`)
+    const data = await res.json()
+    if (!data.comments || !data.comments.length) {
+      list.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:6px 0">Nincs megjegyzés</div>'
+      return
+    }
+    list.innerHTML = ''
+    for (const c of data.comments) {
+      const date = new Date(c.created_at * 1000).toLocaleString('hu-HU', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      const div = document.createElement('div')
+      div.className = 'comment-item'
+      div.innerHTML = `<div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px"><span class="comment-author">${escapeHtml(c.author)}</span><span class="comment-date">${date}</span></div><div class="comment-body">${escapeHtml(c.content)}</div>`
+      list.appendChild(div)
+    }
+  } catch {
+    list.innerHTML = '<div style="color:var(--danger);font-size:12px">Hiba a megjegyzések betöltésekor</div>'
+  }
+}
+
+document.getElementById('ideaCommentSubmit')?.addEventListener('click', async () => {
+  if (!ideaDetailId) return
+  const content = document.getElementById('ideaCommentContent').value.trim()
+  if (!content) { document.getElementById('ideaCommentContent').focus(); return }
+  try {
+    const res = await fetch(`/api/ideas/${encodeURIComponent(ideaDetailId)}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    })
+    if (!res.ok) { showToast('Megjegyzés mentés hiba', 'error'); return }
+    document.getElementById('ideaCommentContent').value = ''
+    await loadIdeaComments(ideaDetailId)
+  } catch { showToast('Megjegyzés mentés hiba', 'error') }
+})
+
+document.getElementById('ideaDetailClose')?.addEventListener('click', () => closeModal(document.getElementById('ideaDetailOverlay')))
+document.getElementById('ideaDetailCloseBtn')?.addEventListener('click', () => closeModal(document.getElementById('ideaDetailOverlay')))
+document.getElementById('ideaDetailEditBtn')?.addEventListener('click', () => {
+  if (!ideaDetailId) return
+  closeModal(document.getElementById('ideaDetailOverlay'))
+  openIdeaEdit(ideaDetailId)
+})
 
 function openIdeaPromote(id) {
   ideasPromoteId = id
@@ -10482,6 +10689,9 @@ async function openIdeaBreakdown(id) {
     breakdownIdeaId = id
     breakdownSubtasks = data.subtasks
     showBreakdownModal(data.subtasks, { title: idea.title })
+    // Show DoD field only in idea mode
+    const dodSection = document.getElementById('breakdownDoDSection')
+    if (dodSection) { dodSection.style.display = ''; document.getElementById('breakdownSuccessCriteria').value = '' }
   } catch {
     showToast('Breakdown hiba')
   }
@@ -10649,8 +10859,11 @@ document.getElementById('terminalClose')?.addEventListener('click', () => {
 // Telegram messages, the agent's replies, and (optionally) its notes/actions.
 // Solves what the raw terminal can't: a readable, searchable review of what
 // actually happened -- also the support view for customer-hosted Marveens.
+const CONVERSATION_PAGE_SIZE = 400
 let conversationEntries = []
 let conversationAgentName = null
+let conversationHasOlder = false
+let conversationLoadingOlder = false
 
 async function openConversationModal(agentName, displayName) {
   const overlay = document.getElementById('conversationOverlay')
@@ -10664,18 +10877,51 @@ async function openConversationModal(agentName, displayName) {
   await loadConversation()
 }
 
+// Latest page (offset=0); resets the loaded window.
 async function loadConversation() {
   const container = document.getElementById('conversationContainer')
   const token = localStorage.getItem('marveen-dashboard-token') || ''
   try {
-    const r = await fetch(`/api/agents/${encodeURIComponent(conversationAgentName)}/conversation?limit=600`, {
+    const r = await fetch(`/api/agents/${encodeURIComponent(conversationAgentName)}/conversation?limit=${CONVERSATION_PAGE_SIZE}&offset=0`, {
       headers: { 'Authorization': 'Bearer ' + token },
     })
     const d = await r.json()
     conversationEntries = Array.isArray(d.entries) ? d.entries : []
+    conversationHasOlder = !!d.hasOlder
     renderConversation()
   } catch {
     if (container) container.innerHTML = '<div class="conversation-empty">Nem sikerült betölteni a beszélgetést.</div>'
+  }
+}
+
+// Page further back: fetch the window of entries immediately before the oldest
+// loaded one and PREPEND it, keeping the scroll position so the view does not
+// jump. Lets the operator read history beyond the on-screen window (and beyond
+// the old fixed cap).
+async function loadOlderConversation() {
+  if (conversationLoadingOlder || !conversationHasOlder) return
+  conversationLoadingOlder = true
+  const btn = document.getElementById('conversationLoadOlder')
+  if (btn) { btn.disabled = true; btn.textContent = 'Betöltés…' }
+  const token = localStorage.getItem('marveen-dashboard-token') || ''
+  try {
+    const offset = conversationEntries.length
+    const r = await fetch(`/api/agents/${encodeURIComponent(conversationAgentName)}/conversation?limit=${CONVERSATION_PAGE_SIZE}&offset=${offset}`, {
+      headers: { 'Authorization': 'Bearer ' + token },
+    })
+    const d = await r.json()
+    const older = Array.isArray(d.entries) ? d.entries : []
+    conversationHasOlder = !!d.hasOlder
+    if (older.length) {
+      conversationEntries = older.concat(conversationEntries)
+      renderConversation({ preserveScroll: true })
+    } else {
+      renderConversation()
+    }
+  } catch {
+    if (btn) { btn.disabled = false; btn.textContent = 'Korábbiak betöltése' }
+  } finally {
+    conversationLoadingOlder = false
   }
 }
 
@@ -10686,17 +10932,33 @@ function fmtConvTs(ts) {
   } catch { return '' }
 }
 
-function renderConversation() {
+function renderConversation(opts = {}) {
   const container = document.getElementById('conversationContainer')
   if (!container) return
+  const prevH = container.scrollHeight
+  const prevTop = container.scrollTop
   const q = (document.getElementById('conversationSearch')?.value || '').toLowerCase().trim()
   const showActions = document.getElementById('conversationShowActions')?.checked
   let list = conversationEntries
   if (!showActions) list = list.filter(e => e.kind === 'in' || e.kind === 'out')
   if (q) list = list.filter(e => (e.text || '').toLowerCase().includes(q))
-  if (!list.length) { container.innerHTML = '<div class="conversation-empty">Nincs megjeleníthető üzenet.</div>'; return }
-  container.innerHTML = list.map(renderConvEntry).join('')
-  container.scrollTop = container.scrollHeight
+  // "Korábbiak betöltése" sits at the top so the operator can page further back;
+  // shown whenever the server still has older entries beyond the loaded window.
+  const olderBtn = conversationHasOlder
+    ? '<button id="conversationLoadOlder" class="conv-load-older">Korábbiak betöltése</button>'
+    : ''
+  if (!list.length) {
+    container.innerHTML = olderBtn || '<div class="conversation-empty">Nincs megjeleníthető üzenet.</div>'
+  } else {
+    container.innerHTML = olderBtn + list.map(renderConvEntry).join('')
+  }
+  document.getElementById('conversationLoadOlder')?.addEventListener('click', loadOlderConversation)
+  if (opts.preserveScroll) {
+    // After prepending older messages, keep the previously-visible ones in place.
+    container.scrollTop = prevTop + (container.scrollHeight - prevH)
+  } else {
+    container.scrollTop = container.scrollHeight
+  }
 }
 
 function renderConvEntry(e) {
@@ -10951,4 +11213,322 @@ function downloadMarkdown(name, content) {
   btn.addEventListener('click', () => { render(); openModal(overlay) })
   if (closeBtn) closeBtn.addEventListener('click', () => closeModal(overlay))
   overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(overlay) })
+})()
+
+// === Archivalt kartyak ===
+;(() => {
+  let archivedInit = false
+
+  const STATUS_LABELS = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Várakozik', done: 'Kész' }
+  const STATUS_COLORS = { planned: '#6b7280', in_progress: '#3b82f6', waiting: '#f59e0b', done: '#10b981' }
+  const PRIORITY_LABELS = { low: 'Alacsony', normal: 'Normál', high: 'Magas', urgent: 'Sürgős' }
+  const PRIORITY_COLORS = { low: '#9ca3af', normal: '#6b7280', high: '#f59e0b', urgent: '#ef4444' }
+
+  function fmtDate(unix) {
+    if (!unix) return ''
+    return new Date(unix * 1000).toLocaleString('hu-HU', { dateStyle: 'short', timeStyle: 'short' })
+  }
+
+  // Render an archived card with the same visual language as the live board:
+  // project pill + #seq title + colored rounded priority/label chips, wrapped in
+  // the .kanban-card frame. The whole card opens a read-only detail modal on
+  // click; the restore button stops propagation so it doesn't also open it.
+  function renderArchivedCard(card) {
+    const prioColor = PRIORITY_COLORS[card.priority] || '#6b7280'
+    const prioLabel = PRIORITY_LABELS[card.priority] || card.priority
+    const seqHtml = card.seq != null
+      ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--text-muted);margin-right:5px">#${card.seq}</span>`
+      : ''
+    const projectHtml = card.project
+      ? `<span class="kanban-card-project">${esc(card.project)}</span>`
+      : ''
+    let labelsHtml = ''
+    if (Array.isArray(card.labels) && card.labels.length > 0) {
+      const pills = card.labels
+        .map(l => `<span class="kanban-card-label-pill" style="--label-color:${esc(l.color)}">#${esc(l.name)}</span>`)
+        .join('')
+      labelsHtml = `<div class="kanban-card-labels">${pills}</div>`
+    }
+    const prioPill = `<span class="archived-prio-pill" style="--prio-color:${prioColor}">${prioLabel}</span>`
+    return `<div class="kanban-card archived-card" data-id="${esc(card.id)}" data-priority="${esc(card.priority)}">
+      ${projectHtml}
+      <div class="kanban-card-title">${seqHtml}${esc(card.title)}</div>
+      <div class="kanban-card-footer">${prioPill}</div>
+      ${labelsHtml}
+      <div class="archived-card-foot">
+        <span class="archived-date">Archiválva: ${fmtDate(card.archived_at)}</span>
+        <button class="btn-secondary btn-compact archived-restore-btn" data-id="${esc(card.id)}" title="Visszaállítás a táblára" style="white-space:nowrap;flex-shrink:0;">Visszaállítás</button>
+      </div>
+    </div>`
+  }
+
+  // Read-only detail modal for an archived card: meta grid, labels, description,
+  // comments -- no editing affordances. Restore button mirrors the card button.
+  async function showArchivedDetail(card) {
+    const seqPrefix = card.seq != null ? `#${card.seq} ` : ''
+    document.getElementById('archivedDetailTitle').textContent = `${seqPrefix}${card.title}`
+    const meta = document.getElementById('archivedDetailMeta')
+    const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + card.id
+    meta.innerHTML = `
+      <div class="meta-item"><span class="meta-label">Azonosító</span><span class="meta-value" style="font-family:monospace">${esc(idLabel)}</span></div>
+      <div class="meta-item"><span class="meta-label">Állapot</span><span class="meta-value">${STATUS_LABELS[card.status] || card.status}</span></div>
+      <div class="meta-item"><span class="meta-label">Felelős</span><span class="meta-value">${card.assignee ? esc(card.assignee) : '-- nincs --'}</span></div>
+      <div class="meta-item"><span class="meta-label">Prioritás</span><span class="meta-value">${PRIORITY_LABELS[card.priority] || card.priority}</span></div>
+      <div class="meta-item"><span class="meta-label">Projekt</span><span class="meta-value">${card.project ? esc(card.project) : '-- nincs --'}</span></div>
+      <div class="meta-item"><span class="meta-label">Archiválva</span><span class="meta-value">${fmtDate(card.archived_at)}</span></div>
+    `
+    const labelsWrap = document.getElementById('archivedDetailLabelsWrap')
+    const labelsBox = document.getElementById('archivedDetailLabels')
+    if (Array.isArray(card.labels) && card.labels.length > 0) {
+      labelsBox.innerHTML = card.labels
+        .map(l => `<span class="kanban-card-label-pill" style="--label-color:${esc(l.color)}">#${esc(l.name)}</span>`)
+        .join('')
+      labelsWrap.style.display = ''
+    } else {
+      labelsWrap.style.display = 'none'
+    }
+    document.getElementById('archivedDetailDesc').textContent = card.description || ''
+
+    const commentsWrap = document.getElementById('archivedDetailCommentsWrap')
+    const commentsBox = document.getElementById('archivedDetailComments')
+    commentsBox.innerHTML = ''
+    try {
+      const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/comments`)
+      const comments = res.ok ? await res.json() : []
+      if (Array.isArray(comments) && comments.length > 0) {
+        for (const c of comments) {
+          const date = new Date(c.created_at * 1000).toLocaleString('hu-HU')
+          const div = document.createElement('div')
+          div.className = 'comment-item'
+          div.innerHTML = `<div><span class="comment-author">${esc(c.author)}</span><span class="comment-date">${date}</span></div><div class="comment-body">${esc(c.content)}</div>`
+          commentsBox.appendChild(div)
+        }
+        commentsWrap.style.display = ''
+      } else {
+        commentsWrap.style.display = 'none'
+      }
+    } catch { commentsWrap.style.display = 'none' }
+
+    const restoreBtn = document.getElementById('archivedDetailRestoreBtn')
+    restoreBtn.disabled = false
+    restoreBtn.textContent = 'Visszaállítás a táblára'
+    restoreBtn.onclick = async () => {
+      restoreBtn.disabled = true
+      restoreBtn.textContent = '...'
+      try {
+        const resp = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/unarchive`, { method: 'POST' })
+        if (resp.ok) {
+          closeModal(document.getElementById('archivedDetailOverlay'))
+          doArchivedSearch()
+        } else {
+          restoreBtn.disabled = false
+          restoreBtn.textContent = 'Visszaállítás a táblára'
+          showToast('Hiba a visszaállításnál.')
+        }
+      } catch {
+        restoreBtn.disabled = false
+        restoreBtn.textContent = 'Visszaállítás a táblára'
+      }
+    }
+    openModal(document.getElementById('archivedDetailOverlay'))
+  }
+
+  async function populateArchivedProjects() {
+    try {
+      const r = await fetch('/api/kanban-projects')
+      if (!r.ok) return
+      const projects = await r.json()
+      const sel = document.getElementById('archivedProject')
+      const cur = sel.value
+      sel.innerHTML = '<option value="">Minden projekt</option>'
+      for (const p of projects) {
+        const opt = document.createElement('option')
+        opt.value = p
+        opt.textContent = p
+        if (p === cur) opt.selected = true
+        sel.appendChild(opt)
+      }
+    } catch { /* best-effort */ }
+  }
+
+  async function doArchivedSearch() {
+    const list = document.getElementById('archivedList')
+    const summary = document.getElementById('archivedSummary')
+    list.className = ''
+    list.innerHTML = '<p class="naplo-empty">Betöltés...</p>'
+    summary.textContent = ''
+
+    const params = new URLSearchParams()
+    const q = document.getElementById('archivedQ').value.trim()
+    const project = document.getElementById('archivedProject').value
+    const from = document.getElementById('archivedFrom').value
+    const to = document.getElementById('archivedTo').value
+    if (q) params.set('q', q)
+    if (project) params.set('project', project)
+    if (from) params.set('from', Math.floor(new Date(from).getTime() / 1000))
+    if (to) params.set('to', Math.floor(new Date(to + 'T23:59:59').getTime() / 1000))
+
+    try {
+      const r = await fetch('/api/kanban/archived?' + params.toString())
+      if (!r.ok) { list.innerHTML = `<p class="naplo-empty error">Hiba: ${r.status}</p>`; return }
+      const data = await r.json()
+      const cards = data.cards || []
+      summary.textContent = `${cards.length} kártya (max ${data.limit})`
+      if (cards.length === 0) { list.innerHTML = '<p class="naplo-empty">Nincs archivált kártya.</p>'; return }
+      list.className = 'archived-grid'
+      list.innerHTML = cards.map(renderArchivedCard).join('')
+      const byId = new Map(cards.map(c => [c.id, c]))
+      // Whole card opens the read-only detail; restore button acts on its own.
+      list.querySelectorAll('.archived-card').forEach(el => {
+        el.addEventListener('click', () => {
+          const card = byId.get(el.dataset.id)
+          if (card) showArchivedDetail(card)
+        })
+      })
+      list.querySelectorAll('.archived-restore-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation()
+          const id = btn.dataset.id
+          btn.disabled = true
+          btn.textContent = '...'
+          try {
+            const resp = await fetch(`/api/kanban/${id}/unarchive`, { method: 'POST' })
+            if (resp.ok) {
+              const cardEl = btn.closest('.archived-card')
+              if (cardEl) cardEl.style.opacity = '0.4'
+              btn.textContent = 'Visszaállítva'
+            } else {
+              btn.disabled = false
+              btn.textContent = 'Visszaállítás'
+              showToast('Hiba a visszaállításnál.')
+            }
+          } catch {
+            btn.disabled = false
+            btn.textContent = 'Visszaállítás'
+          }
+        })
+      })
+    } catch (err) {
+      list.innerHTML = `<p class="naplo-empty error">Hálózati hiba: ${err.message}</p>`
+    }
+  }
+
+  function loadArchivedPage() {
+    if (!archivedInit) {
+      archivedInit = true
+      document.getElementById('archivedSearchBtn').addEventListener('click', doArchivedSearch)
+      document.getElementById('archivedRefreshBtn').addEventListener('click', doArchivedSearch)
+      document.getElementById('archivedQ').addEventListener('keydown', e => { if (e.key === 'Enter') doArchivedSearch() })
+      const adOverlay = document.getElementById('archivedDetailOverlay')
+      document.getElementById('archivedDetailClose').addEventListener('click', () => closeModal(adOverlay))
+      adOverlay.addEventListener('click', e => { if (e.target === adOverlay) closeModal(adOverlay) })
+    }
+    populateArchivedProjects()
+    doArchivedSearch()
+  }
+
+  window.loadArchivedPage = loadArchivedPage
+})()
+
+// === Naplo (Audit Timeline) ===
+;(() => {
+  let naploInitialized = false
+  let naploActiveSource = ''
+
+  const SOURCE_LABELS = { config: 'Config', idea: 'Ötletláda', store: 'Store', diary: 'Eseménynapló' }
+  const SOURCE_COLORS = { config: '#3b82f6', idea: '#10b981', store: '#f59e0b', diary: '#8b5cf6' }
+  const DIARY_ENTRY_LABELS = { log: 'Napló', memory: 'Emlék' }
+  const DIARY_ENTRY_COLORS = { log: '#6b7280', memory: '#a78bfa' }
+
+  function fmtTs(unix) {
+    return new Date(unix * 1000).toLocaleString('hu-HU', { dateStyle: 'short', timeStyle: 'short' })
+  }
+
+  function renderEntry(e) {
+    const sourceColor = SOURCE_COLORS[e.source] || '#6b7280'
+    const sourceLabel = SOURCE_LABELS[e.source] || e.source
+    const badge = `<span class="naplo-badge" style="background:${sourceColor}">${sourceLabel}</span>`
+    const ts = `<span class="naplo-ts">${fmtTs(e.created_at)}</span>`
+    let detail = ''
+    if (e.source === 'config') {
+      const oldV = e.old_value != null ? `<code>${esc(e.old_value)}</code>` : '<em>nincs</em>'
+      const newV = e.new_value != null ? `<code>${esc(e.new_value)}</code>` : '<em>nincs</em>'
+      detail = `<strong>${esc(e.key)}</strong> ${oldV} &rarr; ${newV} <span class="naplo-actor">${esc(e.actor || '')}</span>`
+    } else if (e.source === 'idea') {
+      const from = e.from_status ? `<code>${esc(e.from_status)}</code> &rarr; ` : ''
+      detail = `<strong>${esc(e.idea_id)}</strong> ${from}<code>${esc(e.to_status)}</code>`
+      if (e.note) detail += ` <span class="naplo-note">${esc(e.note)}</span>`
+      if (e.actor) detail += ` <span class="naplo-actor">${esc(e.actor)}</span>`
+    } else if (e.source === 'store') {
+      const sizeStr = e.file_size != null ? ` (${(e.file_size / 1024).toFixed(1)} KB)` : ''
+      const agentStr = e.agent ? ` <span class="naplo-actor">${esc(e.agent)}</span>` : ''
+      const sens = e.is_sensitive ? ' <span class="naplo-sensitive">sensitív</span>' : ''
+      detail = `<code>${esc(e.rel_path)}</code> <span class="naplo-event-type">${esc(e.event_type)}</span>${sizeStr}${agentStr}${sens}`
+    } else if (e.source === 'diary') {
+      const entryColor = DIARY_ENTRY_COLORS[e.entry_type] || '#6b7280'
+      const entryLabel = DIARY_ENTRY_LABELS[e.entry_type] || e.entry_type
+      const entryBadge = `<span class="naplo-badge" style="background:${entryColor};font-size:10px">${entryLabel}</span>`
+      const agentStr = e.agent_id ? ` <span class="naplo-actor">${esc(e.agent_id)}</span>` : ''
+      let contentSnippet = esc(e.content || '').replace(/\n/g, ' ').slice(0, 200)
+      if ((e.content || '').length > 200) contentSnippet += '…'
+      const keywordsStr = e.keywords ? `<div class="naplo-note" style="margin-top:2px">Kulcsszavak: ${esc(e.keywords)}</div>` : ''
+      const catStr = e.category ? ` <span class="naplo-event-type">${esc(e.category)}</span>` : ''
+      detail = `${entryBadge}${catStr}${agentStr}<div class="naplo-diary-content">${contentSnippet}</div>${keywordsStr}`
+    }
+    return `<div class="naplo-entry"><div class="naplo-entry-meta">${ts}${badge}</div><div class="naplo-entry-detail">${detail}</div></div>`
+  }
+
+  async function doNaplo() {
+    const timeline = document.getElementById('naplo-timeline')
+    const summary = document.getElementById('naplo-summary')
+    timeline.innerHTML = '<p class="naplo-empty">Betöltés...</p>'
+    summary.textContent = ''
+
+    const params = new URLSearchParams()
+    if (naploActiveSource) params.set('source', naploActiveSource)
+    const from = document.getElementById('naplo-from').value
+    const to = document.getElementById('naplo-to').value
+    const q = document.getElementById('naplo-q').value.trim()
+    const agentEl = document.getElementById('naplo-agent')
+    const agentVal = agentEl ? agentEl.value.trim() : ''
+    if (from) params.set('from', Math.floor(new Date(from).getTime() / 1000))
+    if (to)   params.set('to', Math.floor(new Date(to + 'T23:59:59').getTime() / 1000))
+    if (q)    params.set('q', q)
+    if (agentVal) params.set('agent', agentVal)
+    params.set('limit', '200')
+
+    try {
+      const res = await fetch('/api/audit-log?' + params.toString())
+      if (!res.ok) { timeline.innerHTML = `<p class="naplo-empty error">Hiba: ${res.status}</p>`; return }
+      const data = await res.json()
+      const entries = data.entries || []
+      summary.textContent = `${entries.length} bejegyzés`
+      if (entries.length === 0) { timeline.innerHTML = '<p class="naplo-empty">Nincs találat.</p>'; return }
+      timeline.innerHTML = entries.map(renderEntry).join('')
+    } catch (err) {
+      timeline.innerHTML = `<p class="naplo-empty error">Hálózati hiba: ${err.message}</p>`
+    }
+  }
+
+  function loadNaplo() {
+    if (!naploInitialized) {
+      naploInitialized = true
+      document.querySelectorAll('#naplo-source-tabs .naplo-tab').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('#naplo-source-tabs .naplo-tab').forEach((b) => b.classList.remove('active'))
+          btn.classList.add('active')
+          naploActiveSource = btn.dataset.source
+          const agentFilter = document.getElementById('naplo-agent-wrap')
+          if (agentFilter) agentFilter.style.display = naploActiveSource === 'diary' ? '' : 'none'
+          doNaplo()
+        })
+      })
+      document.getElementById('naplo-search-btn').addEventListener('click', doNaplo)
+      document.getElementById('naplo-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') doNaplo() })
+      document.getElementById('naplo-refresh-btn').addEventListener('click', doNaplo)
+    }
+    doNaplo()
+  }
+
+  window.loadNaplo = loadNaplo
 })()
