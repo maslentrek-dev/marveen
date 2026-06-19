@@ -19,20 +19,15 @@
       "Bash(head:*)",
       "Bash(tail:*)",
       "Bash(date:*)",
-      "Bash(sqlite3:*)",
       "Bash(mkdir:*)",
       "Bash(git status:*)",
       "Bash(git log:*)",
       "Bash(git diff:*)",
-      "Bash(curl:*)",
       "Bash(echo:*)",
-      "Bash(python3:*)",
       "WebFetch(*)",
       "WebSearch(*)",
       "mcp__plugin_context-mode_context-mode__ctx_fetch_and_index",
       "mcp__plugin_context-mode_context-mode__ctx_search",
-      "mcp__plugin_context-mode_context-mode__ctx_execute",
-      "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
       "mcp__plugin_context-mode_context-mode__ctx_index"
     ],
     "deny": [
@@ -43,7 +38,8 @@
       "Read(**/.env)",
       "Bash(sudo:*)",
       "Bash(rm:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(curl -X POST:*)"
     ]
   }
 }
