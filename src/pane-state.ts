@@ -47,7 +47,17 @@ export type PaneState = 'idle' | 'busy' | 'typing' | 'unknown' | 'error'
 //       happens to contain "bypass permissions on · 1 shell" verbatim
 //       (an echoed log line, a quoted message, etc.) which would
 //       otherwise be misread as idle.
-const IDLE_FOOTER_RX = /bypass permissions on(?: \(shift\+tab to cycle\)| · \d+ shells? · (?:ctrl\+t|↓ to manage))|\? for shortcuts/
+// The idle footer's trailing action area is highly variable: `(shift+tab to
+// cycle)`, or `· N shells · ctrl+t`, or -- when a background monitor and/or
+// sub-agents are present -- `· N monitor · ← for agents · ↓ to manage`. The
+// previous regex only accepted the `· \d+ shells ·` shape, so a session running
+// a background monitor (footer `· 1 monitor · ← for agents · ↓ to manage`) was
+// mis-read as 'unknown' and the router/scheduler silently refused to deliver to
+// it -- a fleet-wide delivery hole. Match `bypass permissions on` + EITHER the
+// shift+tab hint OR any `·`-separated tail ending in a known idle action (ctrl+t
+// / ↓ to manage). Busy states are filtered above (esc to interrupt / busy
+// indicators / paste placeholder), so this stays idle-specific.
+const IDLE_FOOTER_RX = /bypass permissions on(?: \(shift\+tab to cycle\)| · [^\n]*?(?:ctrl\+t|↓ to manage))|\? for shortcuts/
 
 // Positive busy signals. ANY match anywhere in the pane means the turn
 // is mid-flight, even if the footer looks idle for a frame.
