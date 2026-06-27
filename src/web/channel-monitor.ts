@@ -35,7 +35,7 @@ import { notifyChannel } from '../notify.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { attemptChannelMcpReconnect } from './channel-mcp-reconnect.js'
 import { readLastIngestionTimestamp, TRANSCRIPT_DIR } from './inbound-probe.js'
-import { shouldAutoRestartDownAgent, parseEtimeToSeconds } from './agent-restart-policy.js'
+import { decideDownAgentAction, AGENT_MAX_RESTART_ATTEMPTS, parseEtimeToSeconds } from './agent-restart-policy.js'
 // getClaudePidForSession + hasChannelPluginAlive live in the shared liveness
 // module so the standalone channel-coordinator reuses the exact same probe.
 import { getClaudePidForSession, hasChannelPluginAlive } from '../channel-coordinator/liveness.js'
@@ -412,6 +412,15 @@ export function buildMainSessionRespawnCmd(opts: {
 }): string {
   return [
     'export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
+    // MCP startup-batch tuning (parity with channels.sh + startAgentProcess):
+    // the --channels plugin is a stdio MCP server; the main session runs the
+    // most MCP servers (filesystem/playwright/chrome + claude.ai connectors +
+    // the plugin), so without these the channel plugin can be starved out of
+    // the default 3-wide blocking startup batch and never register a poller.
+    // This respawn-pane path is the RECOVERY launcher -- it must tune the same
+    // env as the channels.sh boot path, else a recovery respawn comes up
+    // un-tuned and can re-starve under load.
+    '&& export MCP_SERVER_CONNECTION_BATCH_SIZE=10 MCP_CONNECTION_NONBLOCKING=1 MCP_TIMEOUT=60000',
     '&&', opts.claudePath,
     ...(opts.continueSession ? ['--continue'] : []),
     '--dangerously-skip-permissions',
@@ -1193,16 +1202,28 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         if (!agentDownSince.has(t.session)) agentDownSince.set(t.session, Date.now())
         const lastRestart = agentLastRestart.get(t.agentName!)
         const failures = agentRestartFailures.get(t.agentName!) ?? 0
-        const restart = shouldAutoRestartDownAgent({
+        const action = decideDownAgentAction({
           processAgeMs: getProcessAgeMs(claudePid),
           msSinceLastRestart: lastRestart != null ? Date.now() - lastRestart : null,
           startupGraceMs: AGENT_STARTUP_GRACE_MS,
           restartGraceMs: AGENT_RESTART_GRACE_MS,
           consecutiveFailures: failures,
           maxRestartGraceMs: AGENT_MAX_RESTART_GRACE_MS,
-        })
-        if (!restart) {
+        }, AGENT_MAX_RESTART_ATTEMPTS)
+        if (action === 'skip') {
           logger.debug({ agent: t.agentName, provider: t.provider, failures }, 'Channel plugin probe reports down but agent is within startup/restart back-off -- deferring')
+          continue
+        }
+        if (action === 'alert') {
+          // The cap is reached: restarting is not bringing the plugin back, and
+          // each restart costs the agent its whole session context. Stop the
+          // loop and hand it to a human. Tick the counter past the cap so this
+          // fires exactly once; a later healthy sweep resets it (re-arming the
+          // alert for a future down-spell).
+          logger.error({ agent: t.agentName, provider: t.provider, failures }, 'Agent channel plugin down after max restart attempts -- giving up, alerting operator')
+          sendAlert(`⛔ A(z) ${t.agentName} agens ${t.provider} csatornaja ${AGENT_MAX_RESTART_ATTEMPTS} automatikus ujrainditas utan sem allt helyre. Tovabb nem indinitom ujra (minden restart elveszi a session kontextusat). Kezi beavatkozas kell: nezd meg a ${t.session} session-t es a ${SERVICE_ID} csatorna-plugint.`)
+          agentRestartFailures.set(t.agentName!, failures + 1)
+          agentDownSince.delete(t.session)
           continue
         }
         const agentProvider = resolveAgentProvider(t.agentName!)
