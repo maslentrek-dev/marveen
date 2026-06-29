@@ -66,12 +66,12 @@ Egy-kapcsolat szabály: egyszerre csak egy socket használhatja az `auth_state/`
 
 ### Teams-specifikum
 
-A Microsoft Teams csatorna a [teams-channel](https://github.com/Szotasz/teams-channel) plugin (Azure Bot Service transport). `CHANNEL_PROVIDER=teams` -> a `channels.sh` a `teams@marveen-marketplace` plugint indítja, az állapot a `~/.claude/channels/teams/` mappában (a `TEAMS_STATE_DIR` env-en keresztül). A provider-elágazások (PLUGIN_ID, STATE_ENV_VAR, orphan-reaper, plugin-watchdog) ugyanúgy viselkednek mint a többi providernél, külön kezelés nélkül.
+A Microsoft Teams csatorna a [claude-channel-teams](https://github.com/Szotasz/claude-channel-teams) plugin (Azure Bot Service transport). `CHANNEL_PROVIDER=teams` -> a `channels.sh` a `teams@marveen-marketplace` plugint indítja, az állapot a `~/.claude/channels/teams/` mappában (a `TEAMS_STATE_DIR` env-en keresztül). A provider-elágazások (PLUGIN_ID, STATE_ENV_VAR, orphan-reaper, plugin-watchdog) ugyanúgy viselkednek mint a többi providernél, külön kezelés nélkül.
 
 Beüzemelés:
 
 1. **Azure bot regisztráció.** `/teams:configure` a párbeszédben végigvezet az Azure Bot Service app-regisztráción (app ID + jelszó), majd a botot fel kell venni a kívánt Teams csapatba/csatornába.
-2. **`allowedChannelPlugins` engedélyezés (KÖTELEZŐ, sudo).** A Claude Code a `managed-settings.json` allowlistje alapján csendben eldobja a nem engedélyezett plugin inbound-notifikációit (a bot online-nak látszik, de sosem válaszol). A `teams` plugint fel kell venni:
+2. **`allowedChannelPlugins` engedélyezés.** A Claude Code a `managed-settings.json` allowlistje alapján csendben eldobja a nem engedélyezett plugin inbound-notifikációit (a bot online-nak látszik, de sosem válaszol). A **macOS telepítő install-time automatikusan** felveszi a `teams` plugint (install-macos.sh, sudo a telepítés alatt), tehát friss telepítésnél ez magától megvan. CSAK egy MÁR telepített rendszernél kell kézzel hozzáadni (root-jog):
 
    ```bash
    # macOS: /Library/Application Support/ClaudeCode/managed-settings.json
