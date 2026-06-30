@@ -1231,7 +1231,6 @@ const UNWEDGE_COOLDOWN_MS = 30_000
 // because its box is NEVER auto-cleared (the parked line may be a real reply),
 // so escalation is the only recovery; a sub-agent escalates only after the
 // auto-clear has genuinely failed several times.
-const MAIN_PARKED_ESCALATE_AFTER = 3      // ~90s for the main agent (never auto-cleared)
 const SUBAGENT_PARKED_ESCALATE_AFTER = 6  // ~3min for a sub-agent whose auto-clear keeps failing
 // Per-session record of the last un-wedge attempt: when, on what text, how many
 // consecutive attempts failed to empty the box, and whether we already notified
@@ -1268,27 +1267,20 @@ export function clearStaleParkedInput(session: string, host: string | null = nul
   // record an attempt (this was never a stuck box).
   if (b == null || detectPaneState(b) !== 'typing' || parkedInputText(b) !== parked) return false
 
-  // The main agent's input box is NEVER auto-cleared: a parked line there is
-  // very likely a real, intended reply (e.g. an operator answer typed into the
-  // channel session) -- a Ctrl-U would silently destroy it (the 2026-06-30 "Balogh
-  // reply" near-miss). Instead, leave the box untouched and escalate to the
-  // operator ONCE per stuck episode (NOTIFY only, zero keystrokes -- respects the
-  // hardened no-raw-keystroke area). The operator sends or clears the line.
+  // The main agent's input box is NEVER auto-cleared (a parked line could be a
+  // real reply -- the 2026-06-30 "Balogh" near-miss). The operator escalation is
+  // MUTED (2026-06-30, Szabi): the main box's "parked" lines are overwhelmingly
+  // DIM ghost/placeholder frames (stale capture, not real input -- e.g. a persona
+  // fragment shown for 28 min while the agent was actively turning), so notifying
+  // on each is false-positive noise. The durable fix is the inbox pull-model (no
+  // send-keys delivery -> no parked fragments) + a dim-text guard in pane
+  // detection (a faint SGR line is a ghost, not a parked command). Until those
+  // land: stay silent. Still RECORD the attempt so the cooldown guard backs us off
+  // and we don't re-run the stable-confirm sleep on every router tick.
   if (session === MAIN_CHANNELS_SESSION) {
     const fails = (prev && prev.sig === parked ? prev.fails : 0) + 1
-    const alreadyEscalated = !!(prev && prev.sig === parked && prev.escalated)
-    if (!alreadyEscalated && fails >= MAIN_PARKED_ESCALATE_AFTER) {
-      const preview = parked.slice(0, 80).replace(/[<>&]/g, ' ')
-      notifyChannel(
-        '⚠️ Beragadt egy parkolt (el nem kuldott) sor a fo-agent input-mezojeben, ' +
-        'a beerkezo uzenetek kezbesitese all. Kuldd el (Enter) VAGY torold a sort (Ctrl+U a prompt-boxban), ' +
-        `hogy a varakozok megerkezzenek. Reszlet: "${preview}"`,
-      ).catch(() => { /* notify is best-effort */ })
-      unwedgeAttempts.set(key, { last: nowMs, sig: parked, fails, escalated: true })
-      logger.warn({ session, parked: parked.slice(0, 60), fails }, 'message-router: main-agent parked input -- escalated to operator (NOT auto-cleared)')
-    } else {
-      unwedgeAttempts.set(key, { last: nowMs, sig: parked, fails, escalated: alreadyEscalated })
-    }
+    unwedgeAttempts.set(key, { last: nowMs, sig: parked, fails, escalated: true })
+    logger.debug({ session, parked: parked.slice(0, 60), fails }, 'message-router: main-agent parked input -- left untouched (escalation muted)')
     return false
   }
 
