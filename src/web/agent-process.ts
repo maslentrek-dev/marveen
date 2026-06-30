@@ -38,6 +38,7 @@ import { getSecret } from './vault.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
+import { agentHasActivitySince } from '../db.js'
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
@@ -1232,6 +1233,14 @@ const UNWEDGE_COOLDOWN_MS = 30_000
 // so escalation is the only recovery; a sub-agent escalates only after the
 // auto-clear has genuinely failed several times.
 const MAIN_PARKED_ESCALATE_AFTER = 3      // ~90s for the main agent (never auto-cleared)
+// Stale-frame guard window: if the main agent logged ANY conversation_log turn
+// within this window, it is actively processing -- so a 'typing'+parked capture
+// is a STALE FRAME (a leftover delivery fragment / phantom), NOT a real wedge,
+// and the escalation must be suppressed. A genuinely stuck box blocks delivery,
+// so the agent would be idle (no turns) for the whole window. (2026-06-30: the
+// "Koszi a halakat." persona-fragment false-positive fired while the main agent
+// was actively turning for 28 min -- proof the capture was stale, not stuck.)
+const MAIN_PARKED_STALE_ACTIVITY_MS = 120_000
 const SUBAGENT_PARKED_ESCALATE_AFTER = 6  // ~3min for a sub-agent whose auto-clear keeps failing
 // Per-session record of the last un-wedge attempt: when, on what text, how many
 // consecutive attempts failed to empty the box, and whether we already notified
@@ -1278,6 +1287,16 @@ export function clearStaleParkedInput(session: string, host: string | null = nul
     const fails = (prev && prev.sig === parked ? prev.fails : 0) + 1
     const alreadyEscalated = !!(prev && prev.sig === parked && prev.escalated)
     if (!alreadyEscalated && fails >= MAIN_PARKED_ESCALATE_AFTER) {
+      // STALE-FRAME GUARD: only escalate if the main agent is genuinely idle/wedged.
+      // If it logged any turn within the activity window, the box is NOT actually
+      // blocking delivery -- the capture is a stale frame showing a leftover
+      // delivery fragment/phantom -- so suppress (no operator NOTIFY). This is the
+      // fix for the 2026-06-30 "Koszi a halakat." false-positive.
+      if (agentHasActivitySince(MAIN_AGENT_ID, Math.floor((nowMs - MAIN_PARKED_STALE_ACTIVITY_MS) / 1000))) {
+        unwedgeAttempts.set(key, { last: nowMs, sig: parked, fails, escalated: false })
+        logger.warn({ session, parked: parked.slice(0, 60), fails }, 'message-router: main-agent parked input -- recent agent activity, treating capture as STALE FRAME; escalation suppressed')
+        return false
+      }
       const preview = parked.slice(0, 80).replace(/[<>&]/g, ' ')
       notifyChannel(
         '⚠️ Beragadt egy parkolt (el nem kuldott) sor a fo-agent input-mezojeben, ' +

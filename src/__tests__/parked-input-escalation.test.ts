@@ -34,9 +34,13 @@ vi.mock('node:child_process', async (orig) => ({
   }),
 }))
 vi.mock('../notify.js', () => ({ notifyChannel: vi.fn(async () => {}), notifyTelegram: vi.fn(async () => {}) }))
+// Stale-frame guard liveness probe: default = no recent activity (idle/wedged),
+// so the existing escalate path fires; a test flips it true to assert suppression.
+vi.mock('../db.js', async (orig) => ({ ...(await orig() as object), agentHasActivitySince: vi.fn(() => false) }))
 
 import { clearStaleParkedInput } from '../web/agent-process.js'
 import { notifyChannel } from '../notify.js'
+import { agentHasActivitySince } from '../db.js'
 import { MAIN_CHANNELS_SESSION } from '../web/main-agent.js'
 
 let clock = 1_000_000
@@ -50,6 +54,7 @@ function clearKeystrokes(): string[][] {
 beforeEach(() => {
   h.calls.length = 0
   vi.mocked(notifyChannel).mockClear()
+  vi.mocked(agentHasActivitySince).mockReturnValue(false) // default: idle/wedged
 })
 afterAll(() => { nowSpy.mockRestore() })
 
@@ -70,5 +75,15 @@ describe('parked-input escalation', () => {
   it('still attempts the Ctrl-U clear for a SUB-agent box', () => {
     clearStaleParkedInput('subagent-zara-channels')
     expect(clearKeystrokes().length).toBeGreaterThan(0)
+  })
+
+  it('SUPPRESSES the main escalation when the agent has recent activity (stale frame, not a real wedge)', () => {
+    // 2026-06-30 incident: a leftover delivery fragment ("Koszi a halakat.") read
+    // as parked while the main agent was actively turning -> stale capture, not a
+    // wedge. With recent conversation_log activity, the escalation must NOT fire.
+    vi.mocked(agentHasActivitySince).mockReturnValue(true)
+    for (let i = 0; i < 5; i++) { clearStaleParkedInput(MAIN_CHANNELS_SESSION); clock += COOLDOWN }
+    expect(vi.mocked(notifyChannel)).toHaveBeenCalledTimes(0) // suppressed
+    expect(clearKeystrokes().length).toBe(0)                  // and still never auto-cleared
   })
 })

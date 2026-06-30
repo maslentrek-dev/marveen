@@ -1407,6 +1407,18 @@ export function getPendingMessages(toAgent?: string): AgentMessage[] {
     .all() as AgentMessage[]
 }
 
+// True if the agent logged any conversation_log turn (inbound OR outbound) since
+// `sinceUnixSec`. Used by the stale-parked-input escalation as a liveness probe:
+// a GENUINELY stuck input box blocks all delivery, so the agent is idle (no
+// turns) for the whole window. Recent activity therefore means the 'typing'
+// +parked capture is a STALE FRAME (the agent is actually busy), not a real
+// wedge -- so the escalation must NOT fire. Indexed by idx_convlog_agent.
+export function agentHasActivitySince(agentId: string, sinceUnixSec: number): boolean {
+  return db.prepare(
+    "SELECT 1 FROM conversation_log WHERE agent_id = ? AND created_at > ? LIMIT 1",
+  ).get(agentId, sinceUnixSec) != null
+}
+
 export function markMessageDelivered(id: number): boolean {
   const now = Math.floor(Date.now() / 1000)
   return db.prepare("UPDATE agent_messages SET status = 'delivered', delivered_at = ? WHERE id = ?").run(now, id).changes > 0
