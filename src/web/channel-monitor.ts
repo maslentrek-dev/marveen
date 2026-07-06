@@ -908,6 +908,12 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
 const KEEPALIVE_FILE = join(PROJECT_ROOT, 'store', '.channel-keepalive')
 const KEEPALIVE_STALE_MS = 18 * 60 * 1000 // ~3 missed 6-min cycles
 const KEEPALIVE_RESPAWN_GRACE_MS = 15 * 60 * 1000 // let a respawned session re-establish the file
+// Idle-wedge detection threshold. An IDLE session with a live plugin should
+// never go stale for 45+ min -- the scheduled keepalive task runs every ~6min.
+// If it does, the TUI has stopped processing prompts (idle-wedge). This is
+// independent of the normal 18min threshold, which only fires when the plugin
+// is dead. (Root cause of the 2026-07-05 7.5h undetected freeze.)
+const KEEPALIVE_IDLE_WEDGE_MS = 45 * 60 * 1000
 let marveenLastKeepaliveRespawn = 0
 
 /**
@@ -924,6 +930,35 @@ export function shouldDeferKeepaliveRespawn(
   paneState: PaneState | null
 ): boolean {
   return paneState === 'busy' || paneState === 'typing'
+}
+
+/**
+ * Pure decision: when the Telegram plugin is alive the normal staleness
+ * respawn is suppressed (a live plugin proves the channel is up; stale
+ * keepalive just means the session is quietly idle or busy). BUT an IDLE
+ * session whose keepalive has gone stale for 45+ min is an idle-wedge
+ * candidate: the scheduled keepalive task runs every ~6min, so 45min of
+ * staleness while the pane is idle means the TUI stopped processing prompts.
+ *
+ * Returns:
+ *   'respawn' — confirmed idle-wedge, respawn now
+ *   'warn'    — developing (18–45 min stale + idle), log a warning and skip
+ *   'skip'    — normal skip (plugin alive + busy, or not yet stale enough)
+ */
+export function decideIdleWedgeAction(opts: {
+  pluginAlive: boolean
+  keepaliveAgeMs: number | null
+  stalenessThresholdMs: number  // normal 18min gate
+  idleWedgeThresholdMs: number  // escalation gate (45min)
+  paneState: PaneState | null
+  msSinceLastRespawn: number | null
+  respawnGraceMs: number
+}): 'respawn' | 'warn' | 'skip' {
+  if (!opts.pluginAlive) return 'skip'
+  if (opts.keepaliveAgeMs == null || opts.keepaliveAgeMs <= opts.stalenessThresholdMs) return 'skip'
+  if (opts.msSinceLastRespawn != null && opts.msSinceLastRespawn < opts.respawnGraceMs) return 'skip'
+  if (opts.paneState === 'busy' || opts.paneState === 'typing') return 'skip'
+  return opts.keepaliveAgeMs >= opts.idleWedgeThresholdMs ? 'respawn' : 'warn'
 }
 
 // Pure decision: respawn only when the file EXISTS but has gone stale (a file
@@ -1005,8 +1040,37 @@ function checkMainKeepaliveStaleness(): void {
     if (claudePid != null) {
       const provider = getProvider(getMainAgentProvider())
       if (hasChannelPluginAlive(claudePid, provider.type)) {
-        logger.debug({ claudePid, provider: provider.type }, 'Keepalive stale but channel plugin is alive -- skipping respawn')
-        return
+        // Plugin alive normally means the channel is healthy. But an IDLE
+        // session whose keepalive has gone stale for 45+ min is an idle-wedge
+        // candidate: compute the age now (before the normal path below) so we
+        // can escalate. (Root cause of the 2026-07-05 7.5h undetected freeze.)
+        let keepaliveAgeMs: number | null = null
+        try { keepaliveAgeMs = Date.now() - statSync(KEEPALIVE_FILE).mtimeMs } catch { /* missing */ }
+        const paneContent = capturePane(MAIN_CHANNELS_SESSION)
+        const paneState = paneContent != null ? detectPaneState(paneContent) : null
+        const msSinceLastRespawn = lastMainRespawnAt() ? Date.now() - lastMainRespawnAt() : null
+        const idleWedge = decideIdleWedgeAction({
+          pluginAlive: true,
+          keepaliveAgeMs,
+          stalenessThresholdMs: KEEPALIVE_STALE_MS,
+          idleWedgeThresholdMs: KEEPALIVE_IDLE_WEDGE_MS,
+          paneState,
+          msSinceLastRespawn,
+          respawnGraceMs: KEEPALIVE_RESPAWN_GRACE_MS,
+        })
+        if (idleWedge === 'skip') {
+          logger.debug({ claudePid, provider: provider.type, paneState, keepaliveAgeMs }, 'Keepalive stale but channel plugin is alive -- skipping respawn')
+          return
+        }
+        if (idleWedge === 'warn') {
+          logger.warn({ claudePid, paneState, keepaliveAgeMs }, 'Keepalive stale + plugin alive + pane idle -- possible idle-wedge developing (below respawn threshold)')
+          return
+        }
+        // idleWedge === 'respawn': fall through to the normal respawn path.
+        const ageMin = Math.round((keepaliveAgeMs ?? 0) / 60_000)
+        logger.warn({ claudePid, paneState, keepaliveAgeMs }, 'Keepalive stale + plugin alive + pane idle above idle-wedge threshold -- respawning (idle-wedge escape hatch)')
+        sendAlert(`⚠️ ${BOT_NAME} session idle + plugin él + keepalive ${ageMin} perce frissítetlen -- idle-wedge gyanú (a TUI nem dolgozza fel a promptokat). Respawn-pane most.`)
+        // Fall through to the normal respawn path below.
       }
     }
   } catch (err) {
