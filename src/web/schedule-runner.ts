@@ -42,6 +42,7 @@ import {
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { sendTelegramMessage } from './telegram.js'
 import { runCommandTask } from './command-task.js'
+import { sendAlert, hardRestartMarveenChannels } from './channel-monitor.js'
 
 // How many bare-Enter attempts the post-send resubmit tries before escalating
 // to a clear + re-inject, and the hard cap after which it gives up.
@@ -72,6 +73,25 @@ export function decideScheduledResubmitAction(
   if (!stuck) return 'none'
   if (attempt >= RESUBMIT_MAX_ATTEMPTS) return 'giveup'
   return attempt < RESUBMIT_BARE_ENTER_ATTEMPTS ? 'enter' : 'reinject'
+}
+
+// N consecutive giveups within WINDOW_MS on the same session → hard restart.
+// A successful submit resets the counter (caller deletes from the map).
+export const SCHEDULE_GIVEUP_RESTART_THRESHOLD = 3
+export const SCHEDULE_GIVEUP_WINDOW_MS = 15 * 60 * 1000
+const scheduleGiveupState = new Map<string, { count: number; windowStartMs: number }>()
+
+export function decideScheduleGiveupRestart(
+  prevCount: number,
+  prevWindowStartMs: number,
+  now: number,
+  threshold: number,
+  windowMs: number,
+): { shouldRestart: boolean; nextCount: number; nextWindowStartMs: number } {
+  const expired = now - prevWindowStartMs > windowMs
+  const nextCount = expired ? 1 : prevCount + 1
+  const nextWindowStartMs = expired ? now : prevWindowStartMs
+  return { shouldRestart: nextCount >= threshold, nextCount, nextWindowStartMs }
 }
 
 // --- Schedule Runner ---
@@ -247,9 +267,22 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
         const pane = capturePane(session, host)
         const stuck = pane != null && /❯\s+\S/.test(pane) && pane.includes(marker)
         const action = decideScheduledResubmitAction(attempt, stuck)
-        if (action === 'none') return
+        if (action === 'none') {
+          scheduleGiveupState.delete(session)
+          return
+        }
         if (action === 'giveup') {
-          logger.warn({ task: task.name, session }, 'Scheduled prompt still stuck after Enter + re-inject retries -- giving up')
+          const prev = scheduleGiveupState.get(session) ?? { count: 0, windowStartMs: Date.now() }
+          const d = decideScheduleGiveupRestart(prev.count, prev.windowStartMs, Date.now(), SCHEDULE_GIVEUP_RESTART_THRESHOLD, SCHEDULE_GIVEUP_WINDOW_MS)
+          if (d.shouldRestart) {
+            scheduleGiveupState.delete(session)
+            logger.warn({ task: task.name, session, count: d.nextCount }, 'Scheduled giveup threshold reached -- escalating to hard restart')
+            sendAlert(`🔄 A ${session} session ${d.nextCount}x egymás után beragadt (scheduled giveup) -- hard restart most.`)
+            hardRestartMarveenChannels()
+          } else {
+            scheduleGiveupState.set(session, { count: d.nextCount, windowStartMs: d.nextWindowStartMs })
+            logger.warn({ task: task.name, session, count: d.nextCount }, 'Scheduled prompt still stuck after Enter + re-inject retries -- giving up')
+          }
           return
         }
         if (action === 'reinject') {
