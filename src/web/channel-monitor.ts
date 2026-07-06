@@ -402,6 +402,11 @@ interface MarveenDownState {
   stage: MarveenRecoveryStage
   lastAlertAt: number
   softAttempts: number
+  // Rate-limit /mcp navigations: epoch-ms of the last soft-reconnect attempt.
+  // Without this the 5s tick fires 3 consecutive /mcp opens within 15s when
+  // each attempt defers (busy pane) or fails mid-nav -- leaving the session
+  // trapped in the /mcp modal (root cause of the 25min deaf windows).
+  lastSoftAttemptAt?: number
   stageStartedAt?: number
   // Set once we've issued the diagnostic getUpdates probe for this down-cycle,
   // so we don't spam the upstream API every poll while recovery is running.
@@ -417,7 +422,23 @@ function getMainAgentProvider(): ChannelProviderType {
   return CHANNEL_PROVIDER
 }
 
+// Minimum gap between consecutive /mcp navigations in the soft-reconnect
+// stage. The 5s poll would otherwise open /mcp three times within 15s when
+// each attempt defers (busy pane) or fails mid-nav, leaving the session
+// trapped in the modal (root cause of the 25min deaf windows, 2026-07-06).
+const SOFT_RECONNECT_COOLDOWN_MS = 60_000
+
 function softReconnectMarveen(): boolean {
+  // Blocking-menu guard: never open /mcp while the session is already parked
+  // in an interactive menu. The blocking-menu recovery will send an Escape to
+  // dismiss it; opening /mcp on top would re-enter the very state we're trying
+  // to escape (race observed: 21:37:49 blocking-Escape vs plugin-down reconnect
+  // in the same second, causing a 25min deaf window).
+  const pane = capturePane(MAIN_CHANNELS_SESSION)
+  if (pane != null && detectsBlockingMenu(pane)) {
+    logger.info({ session: MAIN_CHANNELS_SESSION }, 'softReconnectMarveen: pane in blocking menu -- deferring /mcp reconnect (blocking-menu recovery owns the Escape)')
+    return false
+  }
   return attemptChannelMcpReconnect(MAIN_AGENT_ID).ok
 }
 
@@ -1082,15 +1103,21 @@ function handleMarveenDown(): void {
           })
       }
     }
-    if (softReconnectMarveen()) marveenDownState.softAttempts += 1
+    if (now - (marveenDownState.lastSoftAttemptAt ?? 0) >= SOFT_RECONNECT_COOLDOWN_MS) {
+      if (softReconnectMarveen()) marveenDownState.softAttempts += 1
+      marveenDownState.lastSoftAttemptAt = now
+    }
     return
   }
   if (marveenDownState.stage === 'soft') {
-    if (marveenDownState.softAttempts < 3 && softReconnectMarveen()) {
+    const cooldownActive = now - (marveenDownState.lastSoftAttemptAt ?? 0) < SOFT_RECONNECT_COOLDOWN_MS
+    if (!cooldownActive && marveenDownState.softAttempts < 3 && softReconnectMarveen()) {
       marveenDownState.softAttempts += 1
+      marveenDownState.lastSoftAttemptAt = now
       marveenDownState.lastAlertAt = now
       return
     }
+    if (cooldownActive) return
     marveenDownState.stage = 'save'
     marveenDownState.stageStartedAt = now
     marveenDownState.lastAlertAt = now
