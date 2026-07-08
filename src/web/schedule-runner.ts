@@ -17,7 +17,7 @@ import {
   markPendingTaskRetryAlert,
   clearPendingTaskRetryAlert,
 } from '../db.js'
-import { toPendingRetryView, classifyTelegramSendError, type PendingRetryView } from '../pending-retries.js'
+import { toPendingRetryView, classifyTelegramSendError, REALERT_INTERVAL_MS, type PendingRetryView } from '../pending-retries.js'
 import {
   SCHEDULED_TASK_PREAMBLE,
   wrapScheduledTask,
@@ -361,9 +361,11 @@ export function runScheduledTaskNow(
 // 60s retry cadence until success.
 function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
   // Stamp first. If another tick raced us, markPendingTaskRetryAlert
-  // returns false (the WHERE alert_sent_at IS NULL guards it) and we
-  // skip the send entirely.
-  const claimed = markPendingTaskRetryAlert(view.taskName, view.agentName, nowMs)
+  // returns false (the WHERE guard) and we skip the send entirely. The
+  // restampBefore cutoff lets a stamp older than REALERT_INTERVAL_MS be
+  // re-claimed, so a long-stuck task re-alerts on the dead-man cadence
+  // instead of going silent after the first alert.
+  const claimed = markPendingTaskRetryAlert(view.taskName, view.agentName, nowMs, nowMs - REALERT_INTERVAL_MS)
   if (!claimed) return
 
   // Validate the delivery config BEFORE building/sending. A missing token
@@ -390,8 +392,9 @@ function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
 
   const ageMinutes = Math.floor(view.ageMs / 60000)
   const firstAttempt = new Date(view.firstAttempt).toLocaleString('hu-HU')
+  const repeat = view.alertSentAt != null
   const text = [
-    `[${BOT_NAME} scheduler] A(z) "${view.taskName}" (${view.agentName}) utemezett feladat ${ageMinutes} perce varakozik.`,
+    `[${BOT_NAME} scheduler]${repeat ? ' (ISMETELT riasztas)' : ''} A(z) "${view.taskName}" (${view.agentName}) utemezett feladat ${ageMinutes} perce varakozik (${view.attemptCount} probalkozas).`,
     `Elso probalkozas: ${firstAttempt}.`,
     'A rendszer tovabb probalkozik; a dashboard /Utemezesek oldalan visszavonhato.',
   ].join('\n')

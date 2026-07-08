@@ -1011,6 +1011,18 @@ const PANE_IDLE_POLL_S = (PANE_IDLE_POLL_MS / 1000).toFixed(3)
 // never re-inlined here. A capture failure is treated as "not yet idle" and we
 // keep polling within the budget (a transient tmux hiccup should not be read as
 // idle and let us blast a prompt into a busy pane).
+//
+// DIM-STRIPPED capture (2026-07-08): the pane is read through
+// captureParkedInputView, NOT plain capturePane. A DIM (SGR-2) ghost line in
+// the input box -- a queued-message preview or a stale render frame -- is not
+// real typed input, but a plain `-p` capture drops the intensity attribute and
+// paneLooksIdle read it as parked typing. The recovery layer (stuck-input-
+// watcher, clearStaleParkedInput) already reads the dim-stripped view and so
+// saw NOTHING to recover: readiness said "busy forever", recovery said "not
+// wedged", and every scheduled task + inter-agent message + auto-restart
+// starved with zero alerts (observed 2026-07-07: 31h, 1888 consecutive busy
+// deferrals on picard-channels behind one dim queued line). Reading readiness
+// through the SAME dim-stripped view closes that split-brain permanently.
 export function waitForPaneIdle(
   session: string,
   host: string | null = null,
@@ -1018,7 +1030,7 @@ export function waitForPaneIdle(
 ): boolean {
   const deadline = Date.now() + timeoutMs
   for (;;) {
-    const pane = capturePane(session, host)
+    const pane = captureParkedInputView(session, host)
     if (pane != null && paneLooksIdle(pane)) return true
     if (Date.now() >= deadline) return false
     try { execFileSync('/bin/sleep', [PANE_IDLE_POLL_S], { timeout: 2000 }) } catch { /* best effort */ }

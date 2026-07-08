@@ -6,7 +6,7 @@ import {
   agentRunState,
   agentSessionName,
   restartAgentProcess,
-  capturePane,
+  captureParkedInputView,
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { paneLooksIdle } from '../pane-state.js'
@@ -56,8 +56,13 @@ function sessionFor(name: string): string {
   return name === MAIN_AGENT_ID ? MAIN_CHANNELS_SESSION : agentSessionName(name)
 }
 
+// Dim-stripped view (captureParkedInputView, not plain capturePane): a DIM
+// ghost/queued line in the input box is not a live conversation, and reading
+// it as 'busy' deferred the due restart forever -- the exact wedge the
+// scheduled restart exists to clear (2026-07-07 incident). Same view as the
+// readiness check in isSessionReadyForPrompt.
 function paneIsIdle(session: string, host: string | null): boolean {
-  const pane = capturePane(session, host)
+  const pane = captureParkedInputView(session, host)
   if (pane == null) return false
   return paneLooksIdle(pane)
 }

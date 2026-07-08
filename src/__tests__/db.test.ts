@@ -197,6 +197,16 @@ describe('pending task retries', () => {
     expect(row.alert_sent_at).toBe(7_000_100)
   })
 
+  it('markAlert re-stamps when the existing stamp is older than the cutoff (dead-man re-alert)', () => {
+    upsertPendingTaskRetry('task-e2', 'main', 7_100_000, 'busy')
+    expect(markPendingTaskRetryAlert('task-e2', 'main', 7_100_100)).toBe(true)
+    // Stamp (7_100_100) is NOT older than a cutoff below it -> blocked.
+    expect(markPendingTaskRetryAlert('task-e2', 'main', 7_100_200, 7_100_100)).toBe(false)
+    // Stamp IS older than the cutoff -> re-claimed, stamp updated.
+    expect(markPendingTaskRetryAlert('task-e2', 'main', 7_100_300, 7_100_101)).toBe(true)
+    expect(getPendingTaskRetry('task-e2', 'main')!.alert_sent_at).toBe(7_100_300)
+  })
+
   it('separate (name, agent) pairs are distinct rows', () => {
     upsertPendingTaskRetry('task-f', 'agent-1', 8_000_000, 'busy')
     upsertPendingTaskRetry('task-f', 'agent-2', 8_000_000, 'busy')

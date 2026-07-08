@@ -4,6 +4,7 @@ import {
   toPendingRetryView,
   classifyTelegramSendError,
   ALERT_THRESHOLD_MS,
+  REALERT_INTERVAL_MS,
 } from '../pending-retries.js'
 
 describe('shouldSendAlert', () => {
@@ -26,10 +27,24 @@ describe('shouldSendAlert', () => {
     expect(shouldSendAlert(firstAttempt + threshold + 1, firstAttempt, null, threshold)).toBe(true)
   })
 
-  it('returns false if an alert was already sent', () => {
+  it('returns false while a sent alert is younger than the re-alert interval', () => {
+    const alertAt = firstAttempt + threshold + 1
     expect(
-      shouldSendAlert(firstAttempt + 10 * threshold, firstAttempt, firstAttempt + threshold + 1, threshold),
+      shouldSendAlert(alertAt + REALERT_INTERVAL_MS, firstAttempt, alertAt, threshold),
     ).toBe(false)
+  })
+
+  it('re-alerts (dead-man) once the sent alert is older than the re-alert interval', () => {
+    const alertAt = firstAttempt + threshold + 1
+    expect(
+      shouldSendAlert(alertAt + REALERT_INTERVAL_MS + 1, firstAttempt, alertAt, threshold),
+    ).toBe(true)
+  })
+
+  it('honors a custom re-alert interval', () => {
+    const alertAt = firstAttempt + threshold + 1
+    expect(shouldSendAlert(alertAt + 5001, firstAttempt, alertAt, threshold, 5000)).toBe(true)
+    expect(shouldSendAlert(alertAt + 4999, firstAttempt, alertAt, threshold, 5000)).toBe(false)
   })
 
   it('uses the default threshold (1 hour) when not supplied', () => {

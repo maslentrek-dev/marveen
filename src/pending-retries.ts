@@ -30,12 +30,25 @@
 export const ALERT_THRESHOLD_MS = 60 * 60 * 1000
 
 /**
+ * Dead-man re-alert cadence. The original policy alerted exactly ONCE per
+ * row (`alert_sent_at` set -> silence forever after), so a task stuck for a
+ * day produced a single Telegram line at the 1h mark and then failed
+ * silently for the remaining 30+ hours (observed 2026-07-07: 13 tasks, one
+ * alert each, 31h of starvation). A stuck scheduled task must stay LOUD:
+ * after the first alert, re-alert every REALERT_INTERVAL_MS until the task
+ * fires or the operator cancels the retry.
+ */
+export const REALERT_INTERVAL_MS = 4 * 60 * 60 * 1000
+
+/**
  * Decide whether the alerting layer should fire a Telegram notification
  * for a pending retry row.
  *
- * Returns true only when:
- *   - the row has been waiting longer than `thresholdMs`, AND
- *   - no alert is currently stamped (`alertSentAt` is null).
+ * Returns true when:
+ *   - the row has been waiting longer than `thresholdMs` AND no alert is
+ *     stamped yet (`alertSentAt` is null) -- the first alert; OR
+ *   - an alert was already stamped but `realertMs` has passed since --
+ *     the dead-man repeat, so a long-stuck task never goes silent.
  *
  * Callers are responsible for stamping `alert_sent_at` before the Telegram
  * send (race guard against concurrent ticks) and clearing it on delivery
@@ -46,10 +59,11 @@ export function shouldSendAlert(
   firstAttempt: number,
   alertSentAt: number | null,
   thresholdMs: number = ALERT_THRESHOLD_MS,
+  realertMs: number = REALERT_INTERVAL_MS,
 ): boolean {
-  if (alertSentAt != null) return false
   if (!Number.isFinite(firstAttempt) || firstAttempt <= 0) return false
   if (!Number.isFinite(now) || now < firstAttempt) return false
+  if (alertSentAt != null) return now - alertSentAt > realertMs
   return now - firstAttempt > thresholdMs
 }
 

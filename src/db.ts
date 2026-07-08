@@ -1789,10 +1789,16 @@ export function deletePendingTaskRetryById(id: number): boolean {
     .run(id).changes > 0
 }
 
-export function markPendingTaskRetryAlert(taskName: string, agentName: string, ts: number): boolean {
+// Claim the alert slot for a pending retry. The WHERE clause is the race
+// guard: only one concurrent tick can flip the stamp. `restampBeforeMs`
+// enables the dead-man re-alert -- a stamp OLDER than that cutoff may be
+// re-claimed (re-alert), while a fresh stamp still blocks (no double alert
+// within the re-alert window). Pass 0 (default) for the strict
+// first-alert-only behaviour.
+export function markPendingTaskRetryAlert(taskName: string, agentName: string, ts: number, restampBeforeMs = 0): boolean {
   return db
-    .prepare('UPDATE pending_task_retries SET alert_sent_at = ? WHERE task_name = ? AND agent_name = ? AND alert_sent_at IS NULL')
-    .run(ts, taskName, agentName).changes > 0
+    .prepare('UPDATE pending_task_retries SET alert_sent_at = ? WHERE task_name = ? AND agent_name = ? AND (alert_sent_at IS NULL OR alert_sent_at < ?)')
+    .run(ts, taskName, agentName, restampBeforeMs).changes > 0
 }
 
 // --- Vector Search (Ollama + nomic-embed-text) ---
