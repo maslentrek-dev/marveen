@@ -849,6 +849,30 @@ export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
   return { ok: false, error: 'hard restart failed: tmux respawn-pane failed' }
 }
 
+// One-shot-per-spell guard for the main parked-input operator alert below.
+// Keyed on the parked-text signature so a NEW parked text alerts again, but
+// the same stuck line never spams a 60s-tick alert stream.
+let mainParkedAlertSig: string | null = null
+
+// Pure decision: alert the operator about REAL parked input on the MAIN
+// session? Fires only when the pane genuinely reads 'typing' (dim-stripped
+// view -- a ghost never gets here), the soft recovery budget is exhausted,
+// and this exact parked text has not been alerted yet. The response to a
+// wedged main input is ALERT ONLY -- never an auto-clear (2026-06-30 Balogh
+// near-miss) and never a hard restart (it would destroy the draft).
+export function shouldAlertMainParkedInput(
+  paneState: PaneState | null,
+  attempts: number,
+  maxAttempts: number,
+  parkedSig: string | null,
+  alreadyAlertedSig: string | null,
+): boolean {
+  return paneState === 'typing' &&
+    parkedSig !== null &&
+    attempts >= maxAttempts &&
+    alreadyAlertedSig !== parkedSig
+}
+
 // Escalate a main channel input that survived the full soft recovery to a hard
 // restart (respawn-pane). Driven by the pure decideStuckInputRestart; this
 // wrapper owns the I/O + counters. Called once per monitor tick right after the
@@ -857,13 +881,17 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   const parked = state.parkedSig !== null
   // A cleared input box ends the spell -> reset the escalation counter so the
   // next genuine wedge starts fresh (and a successful restart is not penalised).
-  if (!parked) { stuckRestartCount = 0; return }
+  if (!parked) { stuckRestartCount = 0; mainParkedAlertSig = null; return }
   // Busy-guard: never hard-restart while the main pane is actively generating --
   // a parked <channel> block then is a busy session, not a wedge. See
   // applyStuckRestartBusyGuard. detectPaneState reads 'unknown' for an
   // unreadable pane and the guard fails-open on that, so a broken capture never
   // blocks a genuine recovery.
-  const paneContent = capturePane(MAIN_CHANNELS_SESSION)
+  //
+  // DIM-STRIPPED view (2026-07-08): same rationale as the readiness fix -- a
+  // dim ghost line must not read 'typing' here, or it would defer this
+  // escalation forever while the scheduler starves behind the same ghost.
+  const paneContent = captureParkedInputView(MAIN_CHANNELS_SESSION)
   const paneState = paneContent != null ? detectPaneState(paneContent) : null
   const action = applyStuckRestartBusyGuard(paneState, decideStuckInputRestart(
     parked, state.attempts, MAIN_STUCK_THRESHOLDS.maxAttempts,
@@ -872,6 +900,18 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   ))
   if (action === 'skip' && shouldDeferKeepaliveRespawn(paneState)) {
     logger.info({ paneState, attempts: state.attempts }, 'Stuck-input restart deferred -- main pane is busy (working, not wedged)')
+    // REAL parked input on MAIN, soft recovery exhausted: the busy-guard
+    // (rightly) blocks the hard restart forever -- a restart would destroy the
+    // operator's parked draft, and the box is deliberately never auto-cleared
+    // (2026-06-30 Balogh near-miss). Before 2026-07-08 this path was fully
+    // SILENT, so a genuinely wedged main input starved every scheduled task
+    // with zero operator signal. Policy (Picard, 2026-07-08): ALERT, never
+    // clear. One alert per parked-text spell.
+    if (shouldAlertMainParkedInput(paneState, state.attempts, MAIN_STUCK_THRESHOLDS.maxAttempts, state.parkedSig, mainParkedAlertSig)) {
+      mainParkedAlertSig = state.parkedSig
+      logger.error({ session: MAIN_CHANNELS_SESSION, attempts: state.attempts }, 'Main parked input survived soft recovery -- alerting operator (never auto-cleared)')
+      sendAlert(`⚠️ A ${MAIN_CHANNELS_SESSION} input boxában valódi beírt szöveg ragadt be, és a soft recovery (Enter) nem tudta beküldeni. Biztonsági okból NEM ürítem automatikusan. Amíg ott van, az ütemezett feladatok várakoznak. Kézi lépés: tmux attach -t ${MAIN_CHANNELS_SESSION}, majd Enter (beküldés) vagy Ctrl-U (törlés).`)
+    }
   }
   if (action === 'skip') return
   if (action === 'alert') {

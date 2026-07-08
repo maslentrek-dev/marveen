@@ -257,9 +257,15 @@ export function startWebServer(port = 3420): http.Server {
     logger.info({ port }, `Web dashboard: http://localhost:${port}`)
     // Do NOT log the bearer token: launchd/journal/pipe captures of the
     // structured log would otherwise carry a root-equivalent credential.
-    // Print the bootstrap URL directly to stderr instead so it shows in the
-    // interactive terminal but does not land in the pino log stream.
-    const bootstrapUrl = `http://127.0.0.1:${port}/?token=${DASHBOARD_TOKEN}`
+    // Keeping it out of the pino stream is NOT enough: under launchd stderr
+    // itself is redirected to store/dashboard.error.log, so the token landed
+    // in a plaintext file on every restart anyway (found in the 2026-07-08
+    // audit). Print the full bootstrap URL ONLY when stderr is an interactive
+    // terminal; in a service context print a masked URL plus where to read
+    // the token from disk.
+    const bootstrapUrl = process.stderr.isTTY
+      ? `http://127.0.0.1:${port}/?token=${DASHBOARD_TOKEN}`
+      : `http://127.0.0.1:${port}/?token=<masked -- see store/.dashboard-token>`
     process.stderr.write(
       `\nDashboard access URL (paste into browser, token is stored afterward):\n  ${bootstrapUrl}\n\n`
     )

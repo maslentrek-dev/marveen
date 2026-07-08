@@ -86,3 +86,36 @@ describe('applyStuckRestartBusyGuard', () => {
     expect(applyStuckRestartBusyGuard('busy', 'skip')).toBe('skip')
   })
 })
+
+// Main parked-input operator alert (2026-07-08 policy): REAL typed input
+// wedging the main session gets an ALERT -- never an auto-clear, never a
+// restart while 'typing'. One-shot per parked-text signature.
+import { shouldAlertMainParkedInput } from '../web/channel-monitor.js'
+
+describe('shouldAlertMainParkedInput', () => {
+  it('alerts when typing + exhausted + not yet alerted for this text', () => {
+    expect(shouldAlertMainParkedInput('typing', MAX_ATTEMPTS, MAX_ATTEMPTS, 'sig-a', null)).toBe(true)
+  })
+
+  it('does not alert twice for the same parked text (one-shot per spell)', () => {
+    expect(shouldAlertMainParkedInput('typing', MAX_ATTEMPTS, MAX_ATTEMPTS, 'sig-a', 'sig-a')).toBe(false)
+  })
+
+  it('alerts again when a DIFFERENT text parks after a previous alert', () => {
+    expect(shouldAlertMainParkedInput('typing', MAX_ATTEMPTS, MAX_ATTEMPTS, 'sig-b', 'sig-a')).toBe(true)
+  })
+
+  it('stays silent while soft recovery still has attempts left', () => {
+    expect(shouldAlertMainParkedInput('typing', MAX_ATTEMPTS - 1, MAX_ATTEMPTS, 'sig-a', null)).toBe(false)
+  })
+
+  it('stays silent when the pane is busy (working, not wedged) or idle', () => {
+    expect(shouldAlertMainParkedInput('busy', MAX_ATTEMPTS, MAX_ATTEMPTS, 'sig-a', null)).toBe(false)
+    expect(shouldAlertMainParkedInput('idle', MAX_ATTEMPTS, MAX_ATTEMPTS, 'sig-a', null)).toBe(false)
+    expect(shouldAlertMainParkedInput(null, MAX_ATTEMPTS, MAX_ATTEMPTS, 'sig-a', null)).toBe(false)
+  })
+
+  it('stays silent when nothing is parked', () => {
+    expect(shouldAlertMainParkedInput('typing', MAX_ATTEMPTS, MAX_ATTEMPTS, null, null)).toBe(false)
+  })
+})
