@@ -5,7 +5,7 @@ Two steps (the SMS/Telegram login code comes from the operator interactively):
   request            -> connect + send_code_request, persist session+phone_code_hash
   signin <code> [pw] -> sign_in with the code (and 2FA password if set), persist final session
 
-Creds: store/.watchdog-userbot.json (api_id, api_hash). Phone is passed/loaded.
+Creds: store/.watchdog-userbot.json (api_id, api_hash, phone -- E.164, e.g. "+3670...").
 Final authorized session string is written to store/.watchdog-userbot.session (mode 600).
 """
 import asyncio, json, os, sys
@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CREDS = os.path.join(ROOT, "store", ".watchdog-userbot.json")
 LOGIN_TMP = os.path.join(ROOT, "store", ".watchdog-userbot-login.json")
 SESSION_OUT = os.path.join(ROOT, "store", ".watchdog-userbot.session")
-PHONE = "+00000000000"  # operator: set to the prober account phone before running
+PHONE = None  # loaded from the creds JSON ("phone") in main(); no source edit needed
 
 def load(p):
     with open(p) as f:
@@ -56,8 +56,13 @@ async def do_signin(api_id, api_hash, code, password):
     await client.disconnect()
 
 def main():
+    global PHONE
     c = load(CREDS)
     api_id, api_hash = int(c["api_id"]), c["api_hash"]
+    PHONE = c.get("phone")
+    if not PHONE or not PHONE.startswith("+"):
+        print('HIBA: add meg a prober fiók telefonszámát a %s fájlban: "phone": "+..." (E.164)' % CREDS)
+        sys.exit(1)
     cmd = sys.argv[1] if len(sys.argv) > 1 else "request"
     if cmd == "request":
         asyncio.get_event_loop().run_until_complete(do_request(api_id, api_hash))

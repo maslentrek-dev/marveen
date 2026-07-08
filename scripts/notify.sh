@@ -12,6 +12,12 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 TOKEN=$(grep '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" | cut -d= -f2-)
+# Fallback: a channels-migracio ota a bot token a telegram channel plugin
+# env-jeben el, a marveen/.env-ben mar nincs (2026-07-08-an ellenorizve).
+CHANNEL_ENV_FILE="$HOME/.claude/channels/telegram/.env"
+if [ -z "$TOKEN" ] && [ -f "$CHANNEL_ENV_FILE" ]; then
+  TOKEN=$(grep '^TELEGRAM_BOT_TOKEN=' "$CHANNEL_ENV_FILE" | cut -d= -f2-)
+fi
 CHAT_ID=$(grep '^ALLOWED_CHAT_ID=' "$ENV_FILE" | cut -d= -f2-)
 MAIN_AGENT_ID=$(grep '^MAIN_AGENT_ID=' "$ENV_FILE" | head -1 | cut -d= -f2-)
 MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"

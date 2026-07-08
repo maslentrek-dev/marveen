@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """Telethon inbound-probe prober for the channel-deafness watchdog.
 
-Sends __wd_ping <ISO> to the main bot (ALLOWED_CHAT_ID from .env) every
-PROBE_INTERVAL_MS milliseconds. The watchdog reads the main session transcript
-to verify the ping was ingested; if not, it triggers a respawn.
+Sends __wd_ping <ISO> as a DM TO THE MAIN BOT every PROBE_INTERVAL_MS
+milliseconds. The watchdog reads the main session transcript to verify the
+ping was ingested; if not, it triggers a respawn.
+
+Target resolution (2026-07-08 fix): the ping target is the BOT itself, whose
+@username is resolved once at startup via Bot API getMe (TELEGRAM_BOT_TOKEN
+from .env), overridable with WATCHDOG_PROBE_TARGET (e.g. "@my_bot"). The
+previous code sent to ALLOWED_CHAT_ID -- but that is the OPERATOR's private
+chat id: a userbot->operator DM never reaches the bot, so the plugin would
+never ingest the marker and every probe cycle would end in a false deafness
+respawn (and the operator would get pinged every 3 minutes).
 
 SAFE without the prober account being allowlisted (/telegram:access):
 if the session file is missing or auth fails, logs a warning and exits 0.
@@ -38,6 +46,39 @@ PROBE_LAST_SENT_FILE = PROJECT_ROOT / "store" / ".watchdog-probe-last-sent"
 # ---------------------------------------------------------------------------
 # .env parser (same approach as other scripts in this repo)
 # ---------------------------------------------------------------------------
+def resolve_probe_target(env: dict) -> str | None:
+    """The bot @username the ping is DM'd to.
+
+    WATCHDOG_PROBE_TARGET wins (explicit operator override, "@name" or "name");
+    otherwise resolve the bot's username once via Bot API getMe. Never returns
+    a bare numeric id: a fresh StringSession has no access_hash cached for raw
+    ids, while a username resolves through ResolveUsername reliably.
+    """
+    explicit = env.get("WATCHDOG_PROBE_TARGET", "").strip()
+    if explicit:
+        return explicit if explicit.startswith("@") else "@" + explicit
+    token = env.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        # The channel plugin owns the bot token since the channels migration;
+        # marveen/.env no longer carries it (verified 2026-07-08).
+        channel_env = Path.home() / ".claude" / "channels" / "telegram" / ".env"
+        token = read_env(channel_env).get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        return None
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+            f"https://api.telegram.org/bot{token}/getMe", timeout=15
+        ) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        username = (data.get("result") or {}).get("username")
+        return "@" + username if username else None
+    except Exception as exc:
+        # W6: log only the exception type -- the URL carries the bot token.
+        print(f"inbound-prober: getMe failed: {type(exc).__name__}", file=sys.stderr)
+        return None
+
+
 def read_env(path: Path) -> dict:
     result = {}
     try:
@@ -97,17 +138,13 @@ async def main() -> None:
 
     # --- .env config ---
     env = read_env(ENV_FILE)
-    allowed_chat_id_raw = env.get("ALLOWED_CHAT_ID", "").strip()
-    if not allowed_chat_id_raw:
+    probe_target = resolve_probe_target(env)
+    if not probe_target:
         print(
-            "inbound-prober: ALLOWED_CHAT_ID absent in .env -- exiting as safe no-op",
+            "inbound-prober: cannot resolve probe target "
+            "(set WATCHDOG_PROBE_TARGET or a valid TELEGRAM_BOT_TOKEN in .env) -- exiting as safe no-op",
             file=sys.stderr,
         )
-        sys.exit(0)
-    try:
-        allowed_chat_id = int(allowed_chat_id_raw)
-    except ValueError:
-        print(f"inbound-prober: ALLOWED_CHAT_ID is not an integer: {allowed_chat_id_raw!r}", file=sys.stderr)
         sys.exit(0)
 
     probe_interval_ms = 180_000
@@ -180,7 +217,7 @@ async def main() -> None:
             ts_iso = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
             msg = f"__wd_ping {ts_iso}"
             try:
-                await client.send_message(allowed_chat_id, msg)
+                await client.send_message(probe_target, msg)
                 # Write marker AFTER successful send so the TS watchdog has
                 # a reliable last-sent timestamp.
                 PROBE_LAST_SENT_FILE.write_text(ts_iso, encoding="utf-8")
