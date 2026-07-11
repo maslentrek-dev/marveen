@@ -33,6 +33,8 @@ Usage from Python:
 See docs/intel-registry.md for how the collector and the brief fit together.
 """
 
+from __future__ import annotations
+
 import hashlib
 import os
 import sqlite3
