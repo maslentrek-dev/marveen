@@ -78,3 +78,7 @@ scripts/support-mail/no-support-reply.html
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Operator secrets: OAuth tokens, API keys, service-account JSON. Never source,
+# never ships. Public repo -> a stray `git add -A` here would leak live creds.
+credentials/
