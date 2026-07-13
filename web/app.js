@@ -286,6 +286,7 @@ function switchPage(pageId) {
   if (pageId === 'team') { loadTeamGraph() }
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
+  if (pageId === 'costs') loadCosts()
   if (pageId === 'ideas') loadIdeasPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
@@ -331,7 +332,7 @@ const NAV_I18N = {
   skills: 'nav.skills', connectors: 'nav.connectors', migrate: 'nav.migrate',
   docs: 'nav.docs', status: 'nav.status', autonomy: 'nav.autonomy',
   settings: 'nav.settings', vault: 'nav.vault', tokenUsage: 'nav.tokenUsage',
-  ideas: 'nav.ideas', updates: 'nav.updates',
+  ideas: 'nav.ideas', updates: 'nav.updates', costs: 'nav.costs',
 }
 
 function renderNav() {
@@ -374,6 +375,7 @@ const PAGE_HEADER_I18N = {
   tokenUsagePage: { title: 'tokenUsage.page_title',  sub: 'tokenUsage.page_subtitle' },
   updatesPage:    { title: 'updates.page_title',     sub: null },
   naploPage:      { title: 'naplo.page_title',       sub: 'naplo.page_subtitle' },
+  costsPage:      { title: 'costs.page_title',       sub: 'costs.page_subtitle' },
 }
 
 function renderStaticI18n() {
@@ -2157,6 +2159,51 @@ function populateProfileSelect(selectEl, descEl, selected) {
   })
 }
 
+// Populate the per-agent Claude subscription plan dropdown from the named
+// registry (/api/claude-plans). The empty value means "no named plan" -> the
+// agent keeps its raw config-dir / host default. The description line shows the
+// plan type + config dir and flags a Channels-forbidden plan so the operator
+// sees the guardrail context before saving.
+function populatePlanSelect(selectEl, descEl, selected) {
+  if (!selectEl) return
+  fetch('/api/claude-plans')
+    .then(res => (res.ok ? res.json() : []))
+    .catch(() => [])
+    .then((plans) => {
+      const known = plans.some(p => p.id === selected)
+      const opts = [`<option value="">${escapeHtml(t('agents.settings.plan_default'))}</option>`]
+      for (const p of plans) {
+        opts.push(`<option value="${escapeHtml(p.id)}">${escapeHtml(p.label)}</option>`)
+      }
+      // Preserve an already-assigned plan id that is NOT in the loaded registry
+      // (registry edited/renamed, OR /api/claude-plans transiently failed and
+      // returned []). Without this the dropdown would resolve to '' and a save
+      // would silently wipe the real assignment.
+      if (selected && !known) {
+        opts.push(`<option value="${escapeHtml(selected)}">${escapeHtml(selected)}${escapeHtml(t('agents.settings.plan_not_found_suffix'))}</option>`)
+      }
+      selectEl.innerHTML = opts.join('')
+      selectEl.value = selected || ''
+      const updateDesc = () => {
+        if (!descEl) return
+        const val = selectEl.value
+        if (!val) {
+          descEl.textContent = t('agents.settings.plan_default_desc')
+          return
+        }
+        const p = plans.find(x => x.id === val)
+        if (!p) {
+          descEl.textContent = t('agents.settings.plan_unresolved_desc', { id: val })
+          return
+        }
+        const warn = p.channelsAllowed ? '' : t('agents.settings.plan_no_channels')
+        descEl.textContent = `${p.planType} · ${p.configDir}${warn}`
+      }
+      selectEl.onchange = updateDesc
+      updateDesc()
+    })
+}
+
 function resetWizard() {
   wizardStep = 1
   agentName.value = ''
@@ -2724,6 +2771,15 @@ async function openAgentDetail(agentName) {
     document.getElementById('editAgentProfileDesc'),
     currentAgent.securityProfile || 'default',
   )
+  // The main agent's Claude login is managed via channels.sh, not the per-agent
+  // config path, so plan selection does not apply to it. Hide the whole group.
+  const planGroup = document.getElementById('claudePlanGroup')
+  if (planGroup) planGroup.hidden = currentAgent.role === 'main'
+  populatePlanSelect(
+    document.getElementById('editAgentPlan'),
+    document.getElementById('editAgentPlanDesc'),
+    currentAgent.claudePlan || '',
+  )
   renderTeamEditor(currentAgent, agents)
   updateAuthModeUI(currentAgent.authMode || 'shared', currentAgent.hasApiKey || false)
   const memIsoToggle = document.getElementById('memoryIsolationToggle')
@@ -2762,6 +2818,43 @@ async function openAgentDetail(agentName) {
       loadAgents()
     } catch (err) {
       showToast(t('common.error_delete'))
+    }
+  }
+
+  // Export button: download a portable .tar.gz bundle of this agent. Offers to
+  // include channel tokens (off by default -- the safe-to-share variant).
+  // The download goes through the auth-wrapped fetch (the global fetch shim
+  // injects the Bearer header) and is turned into a Blob download, rather than
+  // a plain navigation -- a window.location download cannot carry the
+  // Authorization header and the API would 401 it.
+  document.getElementById('exportAgentBtn').onclick = async () => {
+    if (!currentAgent) return
+    const withSecrets = confirm(
+      'Belevegyük a titkokat (channel bot token, párosítási állapot)?\n\n' +
+      'OK = igen, csak saját gépek közötti átvitelhez.\n' +
+      'Mégse = nem, biztonságosan megosztható (csak identitás + viselkedés).'
+    )
+    const name = currentAgent.name
+    const url = `/api/agents/${encodeURIComponent(name)}/export${withSecrets ? '?secrets=1' : ''}`
+    try {
+      const res = await fetch(url)
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        showToast(data.error || 'Hiba az exportálás során')
+        return
+      }
+      const blob = await res.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = objectUrl
+      a.download = `marveen-agent-${name}.tar.gz`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(objectUrl)
+      showToast(`Ügynök exportálva${withSecrets ? ' (titkokkal)' : ''}`)
+    } catch {
+      showToast('Hiba az exportálás során')
     }
   }
 
@@ -3342,6 +3435,88 @@ document.getElementById('analyzeAllModelsBtn').addEventListener('click', async (
   } catch { panel.innerHTML = '<p style="color:var(--error);font-size:13px">' + t('agents.model.error') + '</p>' }
 })
 
+// === Export ALL agents (whole fleet) into one .tar.gz bundle ===
+const exportAllAgentsBtn = document.getElementById('exportAllAgentsBtn')
+if (exportAllAgentsBtn) {
+  exportAllAgentsBtn.addEventListener('click', async () => {
+    const withSecrets = confirm(
+      'Belevegyük a titkokat (channel bot tokenek, párosítási állapot) MINDEN ügynöknél?\n\n' +
+      'OK = igen, csak saját gépek közötti átvitelhez.\n' +
+      'Mégse = nem, biztonságosan megosztható (csak identitás + viselkedés).'
+    )
+    const url = `/api/agents/export-all${withSecrets ? '?secrets=1' : ''}`
+    try {
+      const res = await fetch(url)
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        showToast(data.error || 'Hiba az exportálás során')
+        return
+      }
+      const blob = await res.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = objectUrl
+      a.download = 'marveen-fleet.tar.gz'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(objectUrl)
+      showToast(`Flotta exportálva${withSecrets ? ' (titkokkal)' : ''}`)
+    } catch {
+      showToast('Hiba az exportálás során')
+    }
+  })
+}
+
+// === Agent import (upload a .tar.gz bundle exported from another machine) ===
+// Accepts both a single-agent bundle and a whole-fleet bundle -- the backend
+// auto-detects the format from the manifest.
+const importAgentBtn = document.getElementById('importAgentBtn')
+const importAgentFile = document.getElementById('importAgentFile')
+if (importAgentBtn && importAgentFile) {
+  importAgentBtn.addEventListener('click', () => importAgentFile.click())
+  importAgentFile.addEventListener('change', async () => {
+    const file = importAgentFile.files && importAgentFile.files[0]
+    if (!file) return
+    // Reset the input so picking the same file again re-fires change.
+    const upload = async (overwrite) => {
+      const form = new FormData()
+      form.append('file', file)
+      if (overwrite) form.append('overwrite', '1')
+      const res = await fetch('/api/agents/import', { method: 'POST', body: form })
+      const data = await res.json().catch(() => ({}))
+      return { res, data }
+    }
+    try {
+      let { res, data } = await upload(false)
+      if (res.status === 409) {
+        const prompt = data.kind === 'fleet'
+          ? 'Néhány ügynök már létezik ezen a gépen. Felülírjuk az ütközőket?'
+          : `Már létezik "${data.name || ''}" nevű ügynök. Felülírjuk?`
+        if (confirm(prompt)) {
+          ;({ res, data } = await upload(true))
+        } else {
+          return
+        }
+      }
+      if (!res.ok) { showToast(data.error || 'Hiba az importálás során'); return }
+      const note = data.includedSecrets ? ' (titkokkal)' : ''
+      if (data.kind === 'fleet') {
+        const n = (data.imported || []).length
+        const skipped = (data.skipped || []).length
+        showToast(`Flotta importálva: ${n} ügynök${note}${skipped ? ` (${skipped} kihagyva)` : ''}`)
+      } else {
+        showToast(`Ügynök importálva: ${data.name}${note}${data.overwritten ? ' (felülírva)' : ''}`)
+      }
+      loadAgents()
+    } catch {
+      showToast('Hiba az importálás során')
+    } finally {
+      importAgentFile.value = ''
+    }
+  })
+}
+
 document.getElementById('saveAutoRestartBtn').addEventListener('click', async () => {
   if (!currentAgent) return
   // Auto-restart applies to the main session too, so (unlike model/profile) we
@@ -3503,6 +3678,24 @@ document.getElementById('saveProfileBtn').addEventListener('click', async () => 
     showToast(body.requiresRestart ? t('agents.toast.profile_saved_restart') : t('agents.toast.profile_saved'))
     loadAgents()
   } catch { showToast(t('agents.toast.profile_error')) }
+})
+
+document.getElementById('savePlanBtn').addEventListener('click', async () => {
+  // The main agent's login comes up via channels.sh, not this path, so its
+  // plan is not settable here (the selector is hidden for it anyway).
+  if (!currentAgent || currentAgent.role === 'main') return
+  const claudePlan = document.getElementById('editAgentPlan').value
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ claudePlan }),
+    })
+    if (!res.ok) throw new Error()
+    currentAgent.claudePlan = claudePlan || null
+    showToast(t('agents.toast.plan_saved'))
+    loadAgents()
+  } catch { showToast(t('agents.toast.plan_error')) }
 })
 
 // === Auth Mode ===
@@ -8663,6 +8856,68 @@ async function loadStatus() {
 }
 
 // ============================================================
+// === CostOps (v0.1, PR #524): local cost ledger summary ===
+// ============================================================
+
+document.getElementById('refreshCostsBtn').addEventListener('click', loadCosts)
+
+async function loadCosts() {
+  const el = document.getElementById('costsContent')
+  const mutedStyle = 'color:var(--text-muted);font-size:13px'
+  el.innerHTML = `<div style="${mutedStyle}">${t('costs.loading')}</div>`
+  try {
+    const res = await fetch('/api/costs/summary')
+    const s = await res.json()
+    if (!res.ok) throw new Error(s?.error || 'request failed')
+
+    const fmtMoney = (n) => (typeof n === 'number' ? n.toLocaleString('hu-HU') : '—') + ' ' + escapeHtml(s.currency || '')
+
+    let html = ''
+
+    if (!s.config_present) {
+      html += `<div style="${mutedStyle};margin-bottom:12px">${t('costs.no_config')}</div>`
+    }
+
+    html += `<div class="overview-stats">
+      <div class="overview-stat"><div class="overview-stat-value">${fmtMoney(s.current_spend)}</div><div class="overview-stat-label">${t('costs.current_spend')}</div></div>
+      <div class="overview-stat"><div class="overview-stat-value">${fmtMoney(s.forecast_month_end)}</div><div class="overview-stat-label">${t('costs.forecast')}</div></div>
+      <div class="overview-stat"><div class="overview-stat-value">${escapeHtml(s.month || '—')}</div><div class="overview-stat-label">${t('costs.month')}</div></div>
+    </div>`
+
+    if (s.budget) {
+      const pct = Math.round((s.budget.used_pct || 0) * 100)
+      const color = s.budget.status === 'hard' ? 'var(--danger,#e74c3c)' : s.budget.status === 'warning' ? 'var(--warn,#e0a800)' : 'var(--text-muted)'
+      html += `<div style="margin-top:16px;padding:12px 16px;border:1px solid var(--border,#333);border-radius:8px">
+        <div style="font-weight:600;margin-bottom:6px">${t('costs.budget_title')}: ${escapeHtml(s.budget.id)} (${fmtMoney(s.budget.amount)})</div>
+        <div style="${mutedStyle}">${t('costs.budget_used')}: <strong style="color:${color}">${pct}%</strong></div>
+      </div>`
+    }
+
+    const sources = Array.isArray(s.all_sources) ? s.all_sources : []
+    if (sources.length === 0) {
+      html += `<div style="${mutedStyle};margin-top:12px">${t('costs.no_sources')}</div>`
+    } else {
+      html += `<div style="overflow-x:auto;margin-top:16px"><table style="width:100%;border-collapse:collapse">
+        <thead><tr style="text-align:left;border-bottom:1px solid var(--border,#333)">
+          <th style="padding:6px 8px">${t('costs.source_name')}</th><th style="padding:6px 8px">${t('costs.source_provider')}</th><th style="padding:6px 8px">${t('costs.source_spend')}</th>
+        </tr></thead>
+        <tbody>${sources.map((src) => `<tr style="border-bottom:1px solid var(--border,#222)">
+          <td style="padding:6px 8px">${escapeHtml(src.name)}</td>
+          <td style="padding:6px 8px;${mutedStyle}">${escapeHtml(src.provider)}</td>
+          <td style="padding:6px 8px">${fmtMoney(src.spend)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`
+    }
+
+    html += `<p style="${mutedStyle};margin-top:16px">${t('costs.token_usage_note')} (${(s.token_usage?.calls ?? 0)} ${t('costs.calls')}, ${(s.token_usage?.input_tokens ?? 0) + (s.token_usage?.output_tokens ?? 0)} tokens)</p>`
+
+    el.innerHTML = html
+  } catch (err) {
+    el.innerHTML = `<div style="${mutedStyle}">${t('costs.load_failed')}</div>`
+  }
+}
+
+// ============================================================
 // === Memory Import ===
 // ============================================================
 
@@ -9328,6 +9583,24 @@ const CHAT_SYSTEM_AGENTS = new Set(['heartbeat','telegram-coordinator','channel-
 // recognizes its real owner. Empty until _marveen resolves (no false match).
 function chatOwnerName() { return window._marveen?.ownerName || '' }
 
+// The main agent's display name (BOT_NAME). mainAgentId() is the routing id
+// (e.g. "marveen") used for matching, avatar lookups and API calls; this is
+// what the user should SEE. Sourced from the backend (/api/marveen -> name,
+// mirrored into _brandTokens.bot by initSidebarBrand), so a renamed install
+// shows its real bot name. Falls back to the id before _marveen resolves.
+// Regression #519/#520: keep the four Messages-view display points routing the
+// main agent id through chatDisplayName -- a later refactor once stripped this
+// and leaked the raw routing id again. Guarded by messages-view-display-name.test.ts.
+function mainAgentDisplayName() {
+  return window._marveen?.name || window._brandTokens?.bot || mainAgentId()
+}
+// Map a routing agent id to its user-facing label: the main agent's id becomes
+// its BOT_NAME display name; every other agent already carries a human name as
+// its id, so it passes through unchanged.
+function chatDisplayName(name) {
+  return name === mainAgentId() ? mainAgentDisplayName() : name
+}
+
 function chatLastSeenKey(agentName) { return 'chat_last_seen_' + agentName }
 function chatGetLastSeen(agentName) { return parseInt(localStorage.getItem(chatLastSeenKey(agentName)) || '0', 10) }
 function chatMarkSeen(agentName, maxId) {
@@ -9400,7 +9673,7 @@ async function loadChatAgentList() {
       const isSelected = name === chatSelectedAgent ? ' selected' : ''
       const dimmed = info ? '' : ' style="opacity:0.5"'
       const unread = chatIsUnread(name, info)
-      const displayName = owner && name === owner ? owner + ' (te)' : name
+      const displayName = owner && name === owner ? owner + ' (te)' : chatDisplayName(name)
       return `<div class="chat-agent-item${isSelected}${unread ? ' unread' : ''}" data-agent="${escapeHtml(name)}"${dimmed}>
         <div class="chat-agent-avatar">${chatAvatarHtml(name, 40)}</div>
         <div class="chat-agent-info">
@@ -9444,7 +9717,7 @@ async function loadChatThread(agentName) {
   chatThreadState.loading = false
 
   const owner = chatOwnerName()
-  const threadDisplayName = owner && agentName === owner ? owner + ' (te)' : agentName
+  const threadDisplayName = owner && agentName === owner ? owner + ' (te)' : chatDisplayName(agentName)
 
   panel.innerHTML = `
     <div class="chat-thread-header">
@@ -9457,7 +9730,7 @@ async function loadChatThread(agentName) {
     <div class="chat-bubbles" id="chatBubbles"><div class="chat-loading-indicator" id="chatLoadingTop" style="display:none;text-align:center;padding:8px;font-size:11px;color:var(--text-muted)">${t('messages.loading')}</div></div>
     <div class="chat-compose">
       <div class="chat-compose-row">
-        <textarea id="chatComposeText" class="chat-compose-input" rows="2" placeholder="${t('messages.placeholder', { agent: escapeHtml(agentName) })}"></textarea>
+        <textarea id="chatComposeText" class="chat-compose-input" rows="2" placeholder="${t('messages.placeholder', { agent: escapeHtml(chatDisplayName(agentName)) })}"></textarea>
         <button class="btn-primary btn-compact chat-send-btn" id="chatSendBtn">${t('messages.send_btn')}</button>
       </div>
     </div>
@@ -9497,7 +9770,10 @@ async function loadChatThread(agentName) {
 
 function buildBubbleHtml(m) {
   const isOutgoing = m.from_agent === mainAgentId()
+  // senderName stays the routing id (avatar lookup keys off it); senderLabel is
+  // what the user sees, so the main agent reads as its BOT_NAME, not "marveen".
   const senderName = isOutgoing ? mainAgentId() : m.from_agent
+  const senderLabel = chatDisplayName(senderName)
   const when = m.created_at ? new Date(m.created_at * 1000).toLocaleString('hu-HU', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''
   const statusMetaRaw = MSG_STATUS_META[m.status] || { label: m.status || '', cls: 'badge' }
   const statusMeta = { ...statusMetaRaw, label: typeof statusMetaRaw.label === 'function' ? statusMetaRaw.label() : statusMetaRaw.label }
@@ -9505,7 +9781,7 @@ function buildBubbleHtml(m) {
     ${!isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml(senderName, 28)}</div>` : ''}
     <div class="chat-bubble ${isOutgoing ? 'bubble-out' : 'bubble-in'}">
       <div class="bubble-meta">
-        ${!isOutgoing ? `<span class="bubble-sender">${escapeHtml(senderName)}</span>` : ''}
+        ${!isOutgoing ? `<span class="bubble-sender">${escapeHtml(senderLabel)}</span>` : ''}
         <span class="bubble-id-chip">#${m.id}</span>
         <span class="badge ${statusMeta.cls}" style="font-size:10px">${escapeHtml(statusMeta.label)}</span>
       </div>
@@ -11174,8 +11450,16 @@ function tuGetColor(agent) {
 function tuMcpServerFromTool(toolName) {
   if (!toolName || !toolName.startsWith('mcp__')) return null
   const parts = toolName.split('__')
-  // parts: ['mcp', '<server>', '<tool>'] -- server may contain single underscores
-  return parts.length >= 3 ? parts[1] : null
+  // parts: ['mcp', '<server>', '<tool>'] for a full tool name, or
+  // ['mcp', '<server>'] for a tuMcpGroupKey() group key -- without accepting
+  // the 2-part form, every grouped MCP row would be mislabelled as builtin.
+  return parts.length >= 2 && parts[1] ? parts[1] : null
+}
+
+function tuMcpGroupKey(toolName) {
+  if (!toolName || !toolName.startsWith('mcp__')) return toolName
+  const parts = toolName.split('__')
+  return parts.length >= 3 ? 'mcp__' + parts[1] : toolName
 }
 
 function tuFormatTokens(n) {
@@ -11978,13 +12262,14 @@ function renderTuToolStats(data) {
     return
   }
 
-  // Aggregate per-model rows into one entry per tool_name
+  // Aggregate per-model rows into one entry per tool (MCP tools grouped by server)
   const byTool = new Map()
   for (const row of data) {
-    let entry = byTool.get(row.tool_name)
+    const key = tuMcpGroupKey(row.tool_name)
+    let entry = byTool.get(key)
     if (!entry) {
-      entry = { tool_name: row.tool_name, count: 0, agentSet: new Set(), costUSD: 0 }
-      byTool.set(row.tool_name, entry)
+      entry = { tool_name: key, count: 0, agentSet: new Set(), costUSD: 0 }
+      byTool.set(key, entry)
     }
     entry.count += row.count || 0
     ;(row.agents || '').split(',').forEach(a => { const s = a.trim(); if (s) entry.agentSet.add(s) })

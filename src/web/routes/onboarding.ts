@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, userInfo } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, STORE_DIR } from '../../config.js'
 import { logger } from '../../logger.js'
@@ -67,9 +67,17 @@ export function decideClaudeAuthPresent(p: {
 
 // Probe the macOS login Keychain for the Claude Code credential item. Any
 // non-zero exit (item absent, `security` unavailable) means "no auth".
+// Hardened per upstream develop: absolute /usr/bin/security (no PATH lookup)
+// and the account name pinned to the current user, so a same-named item under
+// another account never answers for us. Presence-only (no `-w`): the secret
+// itself never enters this process.
 function keychainHasClaudeCredentials(): boolean {
   try {
-    execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials'], { stdio: 'ignore', timeout: 5000 })
+    execFileSync(
+      '/usr/bin/security',
+      ['find-generic-password', '-s', 'Claude Code-credentials', '-a', userInfo().username],
+      { stdio: 'ignore', timeout: 3000 },
+    )
     return true
   } catch { return false }
 }
