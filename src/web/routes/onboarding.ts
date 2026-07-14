@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, userInfo } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, STORE_DIR } from '../../config.js'
 import { logger } from '../../logger.js'
@@ -34,59 +34,41 @@ function readEnvValue(key: string): string | null {
   return null
 }
 
-// Pure auth-presence decision, testable without I/O. Given the probe results
-// (env values, raw credentials.json content, platform, and a lazy Keychain
-// probe) decide whether a usable Claude credential exists. The Keychain probe
-// is only consulted on macOS after the env/file checks miss, so a caller that
-// already has a token (or is not on darwin) never triggers it.
-export function decideClaudeAuthPresent(p: {
-  oauthTokenEnv: string | null
-  apiKeyEnv: string | null
-  credentialsJson: string | null
-  platform: NodeJS.Platform
-  keychainHasCredentials: () => boolean
-}): boolean {
-  if (p.oauthTokenEnv) return true
-  if (p.apiKeyEnv) return true
-  if (p.credentialsJson) {
-    try {
-      const d = JSON.parse(p.credentialsJson) as {
-        claudeAiOauth?: { accessToken?: string }; apiKey?: string
-      }
-      if (d?.claudeAiOauth?.accessToken) return true
-      if (d?.apiKey) return true
-    } catch { /* malformed credentials.json -- treat as absent */ }
-  }
-  // macOS keeps Claude Code credentials in the login Keychain, not in a
-  // credentials.json file. Without this probe a fully-authenticated Mac
-  // install falsely reports no-auth and pops the onboarding wizard over a
-  // working dashboard.
-  if (p.platform === 'darwin' && p.keychainHasCredentials()) return true
-  return false
-}
-
-// Probe the macOS login Keychain for the Claude Code credential item. Any
-// non-zero exit (item absent, `security` unavailable) means "no auth".
+// True auth presence -- an env OAuth token / API key, a real credentials.json
+// OAuth credential, or (macOS) the login Keychain credential. NOT merely "the
+// .env line exists" (it could be empty).
+//
+// The Keychain leg matters: on macOS Claude Code stores the subscription login
+// in the login Keychain and writes NO ~/.claude/.credentials.json, so a fully
+// authenticated fleet looked logged-out to the wizard and the dashboard nagged
+// for a token that would have created a second, drifting credential path.
+// The probe is presence-only: no `-w`, so the credential secret itself never
+// enters this process just to answer a yes/no question. It fails closed (false
+// off macOS / on any lookup error), so a Keychain ACL that refused `security`
+// just falls back to the previous behaviour.
 function keychainHasClaudeCredentials(): boolean {
+  if (process.platform !== 'darwin') return false
   try {
-    execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials'], { stdio: 'ignore', timeout: 5000 })
+    execFileSync(
+      '/usr/bin/security',
+      ['find-generic-password', '-s', 'Claude Code-credentials', '-a', userInfo().username],
+      { timeout: 3000, stdio: 'ignore' },
+    )
     return true
   } catch { return false }
 }
 
-// True auth presence -- an env OAuth token / API key, a real credentials.json
-// OAuth credential, or (on macOS) a Keychain credential. NOT merely "the .env
-// line exists" (it could be empty).
 function claudeAuthPresent(): boolean {
-  let credentialsJson: string | null = null
-  try { credentialsJson = readFileSync(HOME_CREDENTIALS, 'utf-8') } catch { /* no / unreadable credentials.json */ }
-  return decideClaudeAuthPresent({
-    oauthTokenEnv: readEnvValue('CLAUDE_CODE_OAUTH_TOKEN'),
-    apiKeyEnv: readEnvValue('ANTHROPIC_API_KEY'),
-    credentialsJson,
-    platform: process.platform,
-    keychainHasCredentials: keychainHasClaudeCredentials,
-  })
+  if (readEnvValue('CLAUDE_CODE_OAUTH_TOKEN')) return true
+  if (readEnvValue('ANTHROPIC_API_KEY')) return true
+  try {
+    const d = JSON.parse(readFileSync(HOME_CREDENTIALS, 'utf-8')) as {
+      claudeAiOauth?: { accessToken?: string }; apiKey?: string
+    }
+    if (d?.claudeAiOauth?.accessToken) return true
+    if (d?.apiKey) return true
+  } catch { /* no / unreadable credentials.json */ }
+  return keychainHasClaudeCredentials()
 }
 
 function telegramConfigured(): boolean {
