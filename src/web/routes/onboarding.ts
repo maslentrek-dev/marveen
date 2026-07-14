@@ -72,6 +72,7 @@ export function decideClaudeAuthPresent(p: {
 // another account never answers for us. Presence-only (no `-w`): the secret
 // itself never enters this process.
 function keychainHasClaudeCredentials(): boolean {
+  if (process.platform !== 'darwin') return false
   try {
     execFileSync(
       '/usr/bin/security',
