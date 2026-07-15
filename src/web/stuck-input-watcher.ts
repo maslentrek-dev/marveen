@@ -190,9 +190,9 @@ function bareEnterRecovery(label: string, session: string, host: string | null):
 // this flag), only the ghost-risky plain-text branch is closed. Local
 // sub-agents pass TRUE: the env-var strips their ghost at the source, so their
 // plain re-inject (an inter-agent message the TUI failed to submit) is safe.
-function checkLocalSession(label: string, session: string, alertOnGiveUp: boolean, allowPlainReinject: boolean): void {
+async function checkLocalSession(label: string, session: string, alertOnGiveUp: boolean, allowPlainReinject: boolean): Promise<void> {
   const prev = watchState.get(session) ?? NO_STATE
-  const next = recoverStuckInputForSession(session, prev, LOCAL_FAST_THRESHOLDS, allowPlainReinject)
+  const next = await recoverStuckInputForSession(session, prev, LOCAL_FAST_THRESHOLDS, allowPlainReinject)
 
   if (next.parkedSig === null) {
     watchState.delete(session)
@@ -210,7 +210,7 @@ function checkLocalSession(label: string, session: string, alertOnGiveUp: boolea
 }
 
 export function startStuckInputWatcher(): NodeJS.Timeout {
-  function sweep() {
+  async function sweep() {
     // The main agent's channels session is named `<id>-channels`, not
     // `agent-<id>`, so isAgentRunning (which checks the agent- prefix)
     // does not apply. Check it directly; capturePane returns null when it
@@ -227,7 +227,7 @@ export function startStuckInputWatcher(): NodeJS.Timeout {
       // typing-parked box); only run the normal 'typing' recovery when there is
       // no stuck paste this tick.
       if (!recoverParkedPaste(MAIN_AGENT_ID, MAIN_CHANNELS_SESSION, null, LOCAL_FAST_THRESHOLDS)) {
-        checkLocalSession(MAIN_AGENT_ID, MAIN_CHANNELS_SESSION, false, false)
+        await checkLocalSession(MAIN_AGENT_ID, MAIN_CHANNELS_SESSION, false, false)
       }
     } catch (err) {
       logger.debug({ err }, 'stuck-input-watcher: main agent check error')
@@ -247,7 +247,7 @@ export function startStuckInputWatcher(): NodeJS.Timeout {
         // below never see it -- a placeholder reads as 'busy').
         if (host == null) {
           if (!recoverParkedPaste(name, session, null, LOCAL_FAST_THRESHOLDS)) {
-            checkLocalSession(name, session, true, true)
+            await checkLocalSession(name, session, true, true)
           }
         } else {
           if (!recoverParkedPaste(name, session, host, THRESHOLDS)) {
@@ -260,6 +260,6 @@ export function startStuckInputWatcher(): NodeJS.Timeout {
     }
   }
 
-  setTimeout(sweep, INITIAL_DELAY_MS)
-  return setInterval(sweep, INTERVAL_MS)
+  setTimeout(() => { void sweep() }, INITIAL_DELAY_MS)
+  return setInterval(() => { void sweep() }, INTERVAL_MS)
 }

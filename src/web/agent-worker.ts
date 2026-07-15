@@ -512,7 +512,7 @@ async function ensureWorkerReady(ctx: WorkerCtx): Promise<boolean> {
   const deadline = start + WORKER_BOOT_TIMEOUT_MS
   let healed = false
   while (Date.now() < deadline) {
-    if (isSessionReadyForPrompt(ctx.session)) return true
+    if (await isSessionReadyForPrompt(ctx.session)) return true
     if (!healed && Date.now() - start > WORKER_SELF_HEAL_GRACE_MS) {
       healed = true
       try { selfHealWorkerOnce(ctx) } catch (err) { logger.warn({ err }, 'agent-worker: self-heal pass failed') }
@@ -570,7 +570,7 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
   for (const p of [outPath, donePath]) { try { rmSync(p, { force: true }) } catch { /* none */ } }
 
   clearWorkerContext(ctx)
-  sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath))
+  await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath))
 
   const start = Date.now()
   try {

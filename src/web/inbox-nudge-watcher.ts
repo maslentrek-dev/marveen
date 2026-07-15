@@ -190,10 +190,11 @@ export function _resetNudgeStateForTest(): void {
   state = { ...INITIAL_NUDGE_STATE }
 }
 
-function tick(): void {
+async function tick(): Promise<void> {
   // The whole body is fenced: sendPromptToSession/tmux helpers throw on tmux
-  // failure, this is a synchronous setInterval callback, and an escaped throw
-  // would reach the uncaughtException handler and take the dashboard down.
+  // failure, this is a setInterval callback (fired via a void wrapper), and an
+  // escaped throw/rejection would otherwise reach the uncaughtException handler
+  // and take the dashboard down.
   try {
     const now = Date.now()
     const pending = getPendingMessages(MAIN_AGENT_ID)
@@ -229,7 +230,7 @@ function tick(): void {
     }
     if (state.absenceLogged) state = { ...state, absenceLogged: false }
 
-    if (!isSessionReadyForPrompt(MAIN_CHANNELS_SESSION, null)) {
+    if (!(await isSessionReadyForPrompt(MAIN_CHANNELS_SESSION, null))) {
       // Busy is the NORMAL skip path (silent); surface a long busy-wait spell
       // at a slow rate so it is distinguishable from a dead watcher.
       if (now - state.lastBusyLogAt > BUSY_WAIT_LOG_INTERVAL_MS) {
@@ -243,7 +244,7 @@ function tick(): void {
     state = recordNudge(state, now, oldest.id)
     let result: 'sent' | 'aborted-busy'
     try {
-      result = sendPromptToSession(MAIN_CHANNELS_SESSION, nudgeText(resolveLang()), null, {
+      result = await sendPromptToSession(MAIN_CHANNELS_SESSION, nudgeText(resolveLang()), null, {
         onBusyTimeout: 'abort',
         idleTimeoutMs: 2_000,
       })
@@ -273,6 +274,6 @@ function tick(): void {
 }
 
 export function startInboxNudgeWatcher(): NodeJS.Timeout {
-  setTimeout(tick, INBOX_NUDGE_INITIAL_DELAY_MS).unref()
-  return setInterval(tick, INBOX_NUDGE_INTERVAL_MS)
+  setTimeout(() => { void tick() }, INBOX_NUDGE_INITIAL_DELAY_MS).unref()
+  return setInterval(() => { void tick() }, INBOX_NUDGE_INTERVAL_MS)
 }

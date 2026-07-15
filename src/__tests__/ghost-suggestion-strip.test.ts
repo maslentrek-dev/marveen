@@ -169,7 +169,7 @@ describe('isSessionReadyForPrompt wiring (dim-ghost tolerant idle)', () => {
       join(dirname(fileURLToPath(import.meta.url)), '../web/agent-process.ts'),
       'utf-8',
     )
-    const start = src.indexOf('export function isSessionReadyForPrompt')
+    const start = src.indexOf('export async function isSessionReadyForPrompt')
     expect(start).toBeGreaterThan(-1)
     const fn = src.slice(start, start + 2600)
     // typing-vs-idle-box is decided through the dim-ghost-tolerant path, which

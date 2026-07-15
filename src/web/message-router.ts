@@ -434,7 +434,7 @@ export async function runMessageRouterTick(): Promise<void> {
           mainAgentWakeupFiredThisTick = true
           lastMainAgentWakeupMs = now
           try {
-            sendPromptToSession(MAIN_CHANNELS_SESSION, '[inbox-wakeup: pending inter-agent messages]', null, { waitForIdle: false })
+            await sendPromptToSession(MAIN_CHANNELS_SESSION, '[inbox-wakeup: pending inter-agent messages]', null, { waitForIdle: false })
             logger.info({ msgId: msg.id }, 'message-router: main-agent wakeup fired')
           } catch (err) {
             logger.warn({ err }, 'message-router: main-agent wakeup injection failed')
@@ -469,7 +469,7 @@ export async function runMessageRouterTick(): Promise<void> {
         continue
       }
 
-      if (!isSessionReadyForPrompt(session, host)) {
+      if (!(await isSessionReadyForPrompt(session, host))) {
         // ---- session-stuck detection (card 2922e380 thread a) ----
         // Track how long this session has been continuously not-ready.
         const stuckStart = agentStuckSince.get(msg.to_agent)
@@ -496,7 +496,7 @@ export async function runMessageRouterTick(): Promise<void> {
         // ParkedInput only fires on the idle 'typing' state with text unchanged
         // across a settle, so it never clobbers a session that is actually
         // processing or input a human/agent is mid-typing.
-        if (ageMs > JANITOR_PARKED_MIN_AGE_MS && clearStaleParkedInput(session, host)) {
+        if (ageMs > JANITOR_PARKED_MIN_AGE_MS && await clearStaleParkedInput(session, host)) {
           routerLoggedMisses.delete(msg.id)
           continue // input cleared; deliver on the next tick
         }
@@ -564,7 +564,7 @@ export async function runMessageRouterTick(): Promise<void> {
         const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content, msg.id, msg.origin_note)
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.
-        sendPromptToSession(session, prefix + wrapped, host)
+        await sendPromptToSession(session, prefix + wrapped, host)
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }

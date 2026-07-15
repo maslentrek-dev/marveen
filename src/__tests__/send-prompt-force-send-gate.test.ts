@@ -18,7 +18,7 @@ const SCHEDULE_RUNNER = readFileSync(join(__dirname, '../web/schedule-runner.ts'
 
 describe('sendPromptToSession waitForIdle gate', () => {
   it('sendPromptToSession accepts a waitForIdle option', () => {
-    const sigIdx = AGENT_PROCESS.indexOf('export function sendPromptToSession(')
+    const sigIdx = AGENT_PROCESS.indexOf('export async function sendPromptToSession(')
     expect(sigIdx).toBeGreaterThan(0)
     const sig = AGENT_PROCESS.slice(sigIdx, sigIdx + 300)
     // The opts bag grew onBusyTimeout/idleTimeoutMs for the inbox-nudge
@@ -31,9 +31,10 @@ describe('sendPromptToSession waitForIdle gate', () => {
     // The default must be ON: only an explicit waitForIdle:false opts out.
     expect(AGENT_PROCESS).toMatch(/const waitForIdle = opts\.waitForIdle !== false/)
     // And the wait is guarded by that flag, not called unconditionally.
-    expect(AGENT_PROCESS).toMatch(/if \(waitForIdle && !waitForPaneIdle\(session, host, opts\.idleTimeoutMs\)\)/)
+    // waitForPaneIdle is async now (off the event loop), so the gate awaits it.
+    expect(AGENT_PROCESS).toMatch(/if \(waitForIdle && !\(await waitForPaneIdle\(session, host, opts\.idleTimeoutMs\)\)\)/)
     // No unconditional `if (!waitForPaneIdle(` remains.
-    expect(AGENT_PROCESS).not.toMatch(/^\s*if \(!waitForPaneIdle\(session, host\)\) \{/m)
+    expect(AGENT_PROCESS).not.toMatch(/^\s*if \(!\(?await waitForPaneIdle\(session, host\)\)?\) \{/m)
   })
 
   it('onBusyTimeout defaults to the historical best-effort send; abort is explicit opt-in', () => {

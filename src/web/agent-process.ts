@@ -48,6 +48,14 @@ import { notifyChannel } from '../notify.js'
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
 
+// Shared async pacing helper. Replaces the blocking synchronous `/bin/sleep`
+// (execFileSync) pauses in the tmux-driving injection hot-path so a pacing wait
+// no longer parks the libuv event loop (the dashboard-accepts-TCP-but-never-
+// services-HTTP-under-load starvation). Never throws.
+export function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
 // The fleet's channel plugins keyed by provider. A sub-agent must enable ONLY
 // its own provider's plugin; the others are forced off so it cannot spawn a
 // competing poller against the main agent's bot token (the dup-poller / 409
@@ -629,7 +637,9 @@ function startRemoteAgentProcess(
   try {
     runTmux(host, ['new-session', '-d', '-s', session, cmd], { timeout: 10000 })
     logger.info({ name, session, host, workdir }, 'Remote agent tmux session started')
-    scheduleIdentitySetup(session, readAgentDisplayName(name), host)
+    // Fire-and-forget: scheduleIdentitySetup only schedules delayed timers and
+    // resolves immediately; startRemoteAgentProcess stays synchronous (out of scope).
+    void scheduleIdentitySetup(session, readAgentDisplayName(name), host)
     return { ok: true }
   } catch (err) {
     logger.error({ err, name, host }, 'Failed to start remote agent tmux session')
@@ -946,7 +956,9 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // typically appears within 4-6s). Survey-rating modals from prior
     // sessions can also be present, so dismiss both. Errors are swallowed
     // -- the outbound pre-flight remains the safety net if this misses.
-    scheduleIdentitySetup(session, readAgentDisplayName(name))
+    // Fire-and-forget: scheduleIdentitySetup only schedules delayed timers;
+    // startAgentProcess stays synchronous (out of scope, per the conversion rules).
+    void scheduleIdentitySetup(session, readAgentDisplayName(name))
 
     // Colleague auto-unlock (2026-06-22): mirror the main session's
     // post-respawn unlock probe for channel-having sub-agents. After a restart
@@ -1026,14 +1038,14 @@ export function restartAgentProcess(name: string, opts: { fresh?: boolean } = {}
 // caller writing a prompt has a clear input field.
 const SURVEY_MODAL_RX = /How is Claude doing this session/
 
-function dismissSurveyModalIfPresent(session: string, host: string | null = null): void {
+async function dismissSurveyModalIfPresent(session: string, host: string | null = null): Promise<void> {
   try {
     const pane = captureTmux(host, ['capture-pane', '-t', session, '-p'])
     if (!SURVEY_MODAL_RX.test(pane)) return
     runTmux(host, ['send-keys', '-t', session, '0'], { timeout: 5000 })
     // Modal close is one frame; settle window so the next send-keys lands in
     // the prompt input, not the now-stale modal handler.
-    execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 })
+    await delay(300)
     logger.info({ session }, 'Dismissed Claude Code session-rating modal before sending prompt')
   } catch (err) {
     logger.warn({ err, session }, 'Failed to probe/dismiss session-rating modal')
@@ -1048,16 +1060,16 @@ function dismissSurveyModalIfPresent(session: string, host: string | null = null
 // pick option 1 (Resume from summary, recommended) and Enter to confirm.
 const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
 
-export function dismissResumeSummaryModalIfPresent(session: string, host: string | null = null): void {
+export async function dismissResumeSummaryModalIfPresent(session: string, host: string | null = null): Promise<void> {
   try {
     const pane = captureTmux(host, ['capture-pane', '-t', session, '-p'])
     if (!RESUME_SUMMARY_MODAL_RX.test(pane)) return
     runTmux(host, ['send-keys', '-t', session, '1'], { timeout: 5000 })
-    execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
+    await delay(100)
     runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
     // /compact starts immediately and can run for minutes; we only need to
     // unblock the modal so detectPaneState can transition off 'unknown'.
-    execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 })
+    await delay(300)
     logger.info({ session }, 'Dismissed Claude Code resume-from-summary modal before sending prompt')
   } catch (err) {
     logger.warn({ err, session }, 'Failed to probe/dismiss resume-from-summary modal')
@@ -1085,25 +1097,29 @@ const IDENTITY_SEND_DELAY_MS = 5000
 // (resumeMarveenSession / respawnMarveenSessionFresh), which previously left the
 // main session without its identity after auto-recovery. Fire-and-forget; all
 // errors are swallowed/logged so a missed setup never tears down the caller.
-export function scheduleIdentitySetup(session: string, displayName: string, host: string | null = null): void {
+export async function scheduleIdentitySetup(session: string, displayName: string, host: string | null = null): Promise<void> {
   setTimeout(() => {
-    try {
-      dismissSurveyModalIfPresent(session, host)
-      dismissResumeSummaryModalIfPresent(session, host)
-    } catch (err) {
-      logger.warn({ err, session }, 'Post-restart modal dismiss failed')
-    }
-    setTimeout(() => {
+    void (async () => {
       try {
-        for (const cmd of identitySlashCommands(displayName)) {
-          runTmux(host, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
-          execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
-        }
-        logger.info({ session, displayName }, 'Set session /name')
+        await dismissSurveyModalIfPresent(session, host)
+        await dismissResumeSummaryModalIfPresent(session, host)
       } catch (err) {
-        logger.warn({ err, session, displayName }, 'Failed to set session /name')
+        logger.warn({ err, session }, 'Post-restart modal dismiss failed')
       }
-    }, IDENTITY_SEND_DELAY_MS)
+      setTimeout(() => {
+        void (async () => {
+          try {
+            for (const cmd of identitySlashCommands(displayName)) {
+              runTmux(host, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
+              await delay(1000)
+            }
+            logger.info({ session, displayName }, 'Set session /name')
+          } catch (err) {
+            logger.warn({ err, session, displayName }, 'Failed to set session /name')
+          }
+        })()
+      }, IDENTITY_SEND_DELAY_MS)
+    })()
   }, MODAL_DISMISS_DELAY_MS)
 }
 
@@ -1123,7 +1139,7 @@ const SUBMIT_RETRY_MAX_ATTEMPTS = 4
 // the TUI to either transition to busy (turn started) or stay idle
 // with the parked text (still stuck). Empirically 300ms is past the
 // frame-render gap detectPaneState already guards against.
-const SUBMIT_RETRY_POLL_MS = '0.3'
+const SUBMIT_RETRY_POLL_MS = 300
 
 // Pre-flight wait-until-idle gate (root-cause fix for the busy-stuck class).
 // Before streaming chunks we poll the pane and wait for it to return to the
@@ -1148,8 +1164,6 @@ const SUBMIT_RETRY_POLL_MS = '0.3'
 // session that never idles must still receive its prompt eventually.
 const PANE_IDLE_WAIT_TIMEOUT_MS = 12_000
 const PANE_IDLE_POLL_MS = 300
-// String form for /bin/sleep (seconds), kept in sync with PANE_IDLE_POLL_MS.
-const PANE_IDLE_POLL_S = (PANE_IDLE_POLL_MS / 1000).toFixed(3)
 
 // Block until the session's pane looks idle, or the budget elapses. Returns
 // true if idle was observed, false on timeout-still-busy (caller proceeds
@@ -1158,29 +1172,29 @@ const PANE_IDLE_POLL_S = (PANE_IDLE_POLL_MS / 1000).toFixed(3)
 // never re-inlined here. A capture failure is treated as "not yet idle" and we
 // keep polling within the budget (a transient tmux hiccup should not be read as
 // idle and let us blast a prompt into a busy pane).
-export function waitForPaneIdle(
+export async function waitForPaneIdle(
   session: string,
   host: string | null = null,
   timeoutMs: number = PANE_IDLE_WAIT_TIMEOUT_MS,
-): boolean {
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const pane = capturePane(session, host)
     if (pane != null && paneLooksIdle(pane)) return true
     if (Date.now() >= deadline) return false
-    try { execFileSync('/bin/sleep', [PANE_IDLE_POLL_S], { timeout: 2000 }) } catch { /* best effort */ }
+    await delay(PANE_IDLE_POLL_MS)
   }
 }
 
 // Buffer-clear (Ctrl-U) used pre-flight when shouldClearTruncatedPreamble
 // flags a stale preamble. Sent as a single key name (no `-l` literal
 // flag) so tmux interprets it as the control sequence.
-export function clearInputBuffer(session: string, host: string | null = null): void {
+export async function clearInputBuffer(session: string, host: string | null = null): Promise<void> {
   try {
     runTmux(host, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
     // Settle briefly so the next send-keys lands in the freshly cleared
     // buffer rather than racing the Ctrl-U.
-    execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
+    await delay(100)
   } catch (err) {
     logger.warn({ err, session }, 'Failed to clear pane input buffer before send')
   }
@@ -1192,7 +1206,7 @@ export function clearInputBuffer(session: string, host: string | null = null): v
 // cover a frame race where the first one was eaten mid-render.
 const PLACEHOLDER_DISCARD_MAX = 3
 // Settle window after a Ctrl-C so the next capture reflects the cleared box.
-const PLACEHOLDER_DISCARD_SETTLE_S = '0.45'
+const PLACEHOLDER_DISCARD_SETTLE_MS = 450
 
 // Discard a `[Pasted text #N]` placeholder (or the verbatim text it expands
 // into) from the input box with Ctrl-C, then confirm the box no longer holds
@@ -1206,7 +1220,7 @@ const PLACEHOLDER_DISCARD_SETTLE_S = '0.45'
 // detectsPastePlaceholder guarantees at the call site. We re-check before each
 // press and stop the instant the placeholder is gone, so we never press Ctrl-C
 // into an already-empty box. Returns true if the placeholder was cleared.
-function discardPlaceholderBuffer(session: string, host: string | null = null): boolean {
+async function discardPlaceholderBuffer(session: string, host: string | null = null): Promise<boolean> {
   for (let i = 0; i < PLACEHOLDER_DISCARD_MAX; i++) {
     const pane = capturePane(session, host)
     // Stop pressing once the stub is gone -- a further Ctrl-C on an empty box
@@ -1218,7 +1232,7 @@ function discardPlaceholderBuffer(session: string, host: string | null = null): 
       logger.warn({ err, session }, 'discardPlaceholderBuffer: Ctrl-C send failed')
       return false
     }
-    try { execFileSync('/bin/sleep', [PLACEHOLDER_DISCARD_SETTLE_S], { timeout: 2000 }) } catch { /* best effort */ }
+    await delay(PLACEHOLDER_DISCARD_SETTLE_MS)
   }
   const finalPane = capturePane(session, host)
   return finalPane != null && !detectsPastePlaceholder(finalPane)
@@ -1243,14 +1257,14 @@ function discardPlaceholderBuffer(session: string, host: string | null = null): 
 // still reports stuck, send up to SUBMIT_RETRY_MAX_ATTEMPTS extra
 // Enters. The retry budget bounds the loop so a pathologically stuck
 // pane gives up rather than spinning.
-export function sendPromptToSession(
+export async function sendPromptToSession(
   session: string,
   text: string,
   host: string | null = null,
   opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number } = {},
-): 'sent' | 'aborted-busy' {
-  dismissSurveyModalIfPresent(session, host)
-  dismissResumeSummaryModalIfPresent(session, host)
+): Promise<'sent' | 'aborted-busy'> {
+  await dismissSurveyModalIfPresent(session, host)
+  await dismissResumeSummaryModalIfPresent(session, host)
 
   // Pre-flight wait-until-idle (root-cause gate). Placed here -- inside
   // sendPromptToSession, AFTER the modal dismissals (a modal keeps the pane
@@ -1278,7 +1292,7 @@ export function sendPromptToSession(
   // opts.idleTimeoutMs lets such callers use a short budget instead of the
   // default 12s (they already confirmed idleness moments ago).
   const waitForIdle = opts.waitForIdle !== false
-  if (waitForIdle && !waitForPaneIdle(session, host, opts.idleTimeoutMs)) {
+  if (waitForIdle && !(await waitForPaneIdle(session, host, opts.idleTimeoutMs))) {
     if (opts.onBusyTimeout === 'abort') {
       logger.info({ session }, 'sendPromptToSession: pane busy past idle budget; aborting per caller policy (no keystrokes sent)')
       return 'aborted-busy'
@@ -1294,7 +1308,7 @@ export function sendPromptToSession(
     const preCapture = captureTmux(host, ['capture-pane', '-t', session, '-p'])
     if (shouldClearTruncatedPreamble(preCapture)) {
       logger.info({ session }, 'Cleared stale preamble from input buffer before sending prompt')
-      clearInputBuffer(session, host)
+      await clearInputBuffer(session, host)
     }
   } catch (err) {
     logger.warn({ err, session }, 'Pre-send capture-pane failed; skipping truncated-preamble check')
@@ -1314,7 +1328,7 @@ export function sendPromptToSession(
   // so a long run of dashes doesn't inflate one chunk past the paste-detector
   // threshold; if the cap is reached, prepend a space to the chunk instead.
   const MAX_SLIDE = 8
-  const sendChunks = (): void => {
+  const sendChunks = async (): Promise<void> => {
     let i = 0
     while (i < oneLine.length) {
       let end = Math.min(i + CHUNK, oneLine.length)
@@ -1326,11 +1340,11 @@ export function sendPromptToSession(
       if (chunk.startsWith('-')) chunk = ' ' + chunk
       runTmux(host, ['send-keys', '-t', session, '-l', chunk], { timeout: 5000 })
       i = end
-      if (i < oneLine.length) execFileSync('/bin/sleep', ['0.03'], { timeout: 1000 })
+      if (i < oneLine.length) await delay(30)
     }
     runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
   }
-  sendChunks()
+  await sendChunks()
 
   // Post-send retry loop. The payload hint is the first chunk of oneLine
   // (truncated to a safe length) so the verbatim-stuck path has something
@@ -1352,7 +1366,7 @@ export function sendPromptToSession(
   //     resend that itself parks is re-cleared and retried until it lands.
   const payloadHint = oneLine.slice(0, Math.min(oneLine.length, 96))
   for (let attempt = 0; ; attempt++) {
-    try { execFileSync('/bin/sleep', [SUBMIT_RETRY_POLL_MS], { timeout: 2000 }) } catch { /* best effort */ }
+    await delay(SUBMIT_RETRY_POLL_MS)
     const pane = capturePane(session, host)
     const action = decideSubmitFollowup(pane, payloadHint, attempt, SUBMIT_RETRY_MAX_ATTEMPTS)
     if (action === 'done') break
@@ -1366,11 +1380,11 @@ export function sendPromptToSession(
       // chunk stream. The loop re-samples on the next iteration and will keep
       // recovering (or give up at the budget) if the resend itself parks.
       logger.info({ session, attempt }, 'sendPromptToSession: paste placeholder detected; clearing and re-sending')
-      if (!discardPlaceholderBuffer(session, host)) {
+      if (!(await discardPlaceholderBuffer(session, host))) {
         logger.warn({ session, attempt }, 'sendPromptToSession: failed to clear paste placeholder before resend')
       }
       try {
-        sendChunks()
+        await sendChunks()
       } catch (err) {
         logger.warn({ err, session, attempt }, 'Clear-and-resend chunk replay failed')
         break
@@ -1392,7 +1406,7 @@ export function sendPromptToSession(
 // looks idle. The Claude Code UI renders the "idle footer without `esc
 // to interrupt`" line for ~1 frame after a turn submits before the
 // spinner lands; a quarter-second settle window is well past that.
-const PANE_READY_CONFIRM_DELAY_S = '0.25'
+const PANE_READY_CONFIRM_DELAY_MS = 250
 
 // Send a bare Enter to a session. Used by the stuck-input watcher to
 // re-submit a prompt whose trailing Enter was swallowed on the channel-
@@ -1460,7 +1474,7 @@ export function captureParkedInputView(session: string, host: string | null = nu
 // session that cannot act on it. We only log/audit the refusal here; how (or
 // whether) to recover the session is left to the caller / operator tooling, so
 // this predicate stays a pure, dependency-free readiness check.
-export function isSessionReadyForPrompt(session: string, host: string | null = null): boolean {
+export async function isSessionReadyForPrompt(session: string, host: string | null = null): Promise<boolean> {
   // Dim-ghost tolerant idle read: CC >=2.1.202 paints a dim placeholder into
   // the empty input box, which a plain capture reads as parked text. Only when
   // the plain view says 'typing' do we pay for the second (-e, dim-stripped)
@@ -1476,7 +1490,7 @@ export function isSessionReadyForPrompt(session: string, host: string | null = n
   }
   if (!idleOrGhost(first)) return false
 
-  try { execFileSync('/bin/sleep', [PANE_READY_CONFIRM_DELAY_S], { timeout: 2000 }) } catch { /* best effort */ }
+  await delay(PANE_READY_CONFIRM_DELAY_MS)
 
   const second = capturePane(session, host)
   if (second == null) return false
@@ -1490,14 +1504,14 @@ export function isSessionReadyForPrompt(session: string, host: string | null = n
 // How long to wait between the two parked-input captures when deciding whether
 // the input box is STUCK (stale) vs being actively typed. Identical parked text
 // across this gap means nobody is typing -> it is a stranded artifact.
-const PARKED_STABLE_CONFIRM_S = '2'
+const PARKED_STABLE_CONFIRM_MS = 2000
 // Settle after a Ctrl-U so the next capture reflects the cleared box.
-const PARKED_CLEAR_SETTLE_S = '0.3'
+const PARKED_CLEAR_SETTLE_MS = 300
 // Bound the Ctrl-U presses for a (possibly multi-line) stale parked input.
 const PARKED_CLEAR_MAX = 3
 // A parked input that resists clearing must NOT be retried on every router tick:
-// each attempt blocks the event loop for ~PARKED_STABLE_CONFIRM_S on the settle
-// sleep, so a permanently-stuck box would pin the loop, stall the HTTP server
+// each attempt awaits ~PARKED_STABLE_CONFIRM_MS on the settle
+// delay, so a permanently-stuck box would otherwise starve the loop, stall the HTTP server
 // (health probes read 000) and drive the watchdog into a dashboard restart loop.
 // Retry the SAME stuck text at most once per this window, per session.
 const UNWEDGE_COOLDOWN_MS = 30_000
@@ -1521,7 +1535,7 @@ const unwedgeAttempts = new Map<string, { last: number; sig: string; fails: numb
 // parked text -- never 'busy'/processing) AND the text is unchanged across a
 // short settle, so input a human or agent is actively typing is never clobbered.
 // Returns true if it cleared something (caller should retry delivery next tick).
-export function clearStaleParkedInput(session: string, host: string | null = null): boolean {
+export async function clearStaleParkedInput(session: string, host: string | null = null): Promise<boolean> {
   const a = capturePane(session, host)
   if (a == null || detectPaneState(a) !== 'typing') return false
   // DIM-GUARD (2026-06-30, Szabi insight): extract the parked TEXT from the
@@ -1545,7 +1559,7 @@ export function clearStaleParkedInput(session: string, host: string | null = nul
   const prev = unwedgeAttempts.get(key)
   if (prev && prev.sig === parked && nowMs - prev.last < UNWEDGE_COOLDOWN_MS) return false
 
-  try { execFileSync('/bin/sleep', [PARKED_STABLE_CONFIRM_S], { timeout: 4000 }) } catch { /* best effort */ }
+  await delay(PARKED_STABLE_CONFIRM_MS)
   const b = capturePane(session, host)
   // Changed (someone is typing) or already cleared -> leave it alone, and do not
   // record an attempt (this was never a stuck box). Compare on the SAME dim-
@@ -1571,7 +1585,7 @@ export function clearStaleParkedInput(session: string, host: string | null = nul
 
   for (let i = 0; i < PARKED_CLEAR_MAX; i++) {
     runTmux(host, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
-    try { execFileSync('/bin/sleep', [PARKED_CLEAR_SETTLE_S], { timeout: 2000 }) } catch { /* best effort */ }
+    await delay(PARKED_CLEAR_SETTLE_MS)
     const after = capturePane(session, host)
     if (after == null || detectPaneState(after) !== 'typing') break
   }
@@ -1584,7 +1598,7 @@ export function clearStaleParkedInput(session: string, host: string | null = nul
     runTmux(host, ['send-keys', '-t', session, 'C-k'], { timeout: 5000 })
     for (let i = 0; i < PARKED_CLEAR_MAX; i++) {
       runTmux(host, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
-      try { execFileSync('/bin/sleep', [PARKED_CLEAR_SETTLE_S], { timeout: 2000 }) } catch { /* best effort */ }
+      await delay(PARKED_CLEAR_SETTLE_MS)
       post = capturePane(session, host)
       if (post == null || detectPaneState(post) !== 'typing') break
     }
