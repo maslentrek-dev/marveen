@@ -676,11 +676,11 @@ window._i18n.hu = {
 
   // --- Skills ---
   'skills.page_title':           'Skillek',
-  'skills.page_subtitle':        'A Claude Code által látott skillek (user mappa + plugin cache)',
+  'skills.page_subtitle':        'A Claude Code által látott skillek: globális (user mappa + plugin cache) és ágens-saját',
   'skills.stat.total':           'Összes',
   'skills.stat.user':            'User (saját)',
   'skills.stat.plugin':          'Plugin',
-  'skills.stat.documented':      'Dokumentált',
+  'skills.stat.agent_local':     'Ágens-saját',
   'skills.error':                'Hiba a betoltes soran',
   'skills.no_description':       'Nincs leírás',
   'skills.content_not_found':    '(SKILL.md nem található)',
@@ -715,6 +715,7 @@ window._i18n.hu = {
   'skills.filter.all':           'Összes',
   'skills.filter.user':          'User',
   'skills.filter.plugin':        'Plugin',
+  'skills.filter.agent':         'Ágens',
   'skills.mtime.title':          'Utolsó módosítás',
   'skills.keywords.label':       'Kulcsszavak:',
   'skills.agents.label':         'Agensek:',

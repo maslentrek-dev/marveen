@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { logger } from '../../logger.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
-import { AGENTS_BASE_DIR, listAgentNames, readFileOr } from '../agent-config.js'
+import { AGENTS_BASE_DIR, listAgentNames, readFileOr, agentDir } from '../agent-config.js'
+import { MAIN_AGENT_ID, PROJECT_ROOT } from '../../config.js'
 import { generateSkillMd } from '../agent-scaffold.js'
 import { parseMultipart } from '../multipart.js'
 import { readBody, json } from '../http-helpers.js'
@@ -159,6 +160,61 @@ export async function tryHandleSkills(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // Return all local (agent-specific) skills across the whole fleet.
+  // Must be matched before /:name so "local" is not treated as a skill name.
+  if (path === '/api/skills/local' && method === 'GET') {
+    type LocalSkillEntry = {
+      name: string
+      label: string
+      agentId: string
+      description: string
+      keywords: string[]
+      mtime: number
+      source: 'agent'
+    }
+    const result: LocalSkillEntry[] = []
+    // Prepend MAIN_AGENT_ID explicitly: listAgentNames() scans AGENTS_BASE_DIR
+    // subdirectories, so the main agent (which lives in PROJECT_ROOT, not under
+    // agents/<id>/) is never returned by that call.
+    const subAgentNames = listAgentNames()
+    const allAgentNames = subAgentNames.includes(MAIN_AGENT_ID)
+      ? subAgentNames
+      : [MAIN_AGENT_ID, ...subAgentNames]
+    for (const agentName of allAgentNames) {
+      // The main agent's local skills live at PROJECT_ROOT/.claude/skills (not
+      // under agents/<id>/, which does not exist). Same pattern as CLAUDE.md path
+      // resolution in ensureAutonomySection.
+      const skillsDir = agentName === MAIN_AGENT_ID
+        ? join(PROJECT_ROOT, '.claude', 'skills')
+        : join(agentDir(agentName), '.claude', 'skills')
+      if (!existsSync(skillsDir)) continue
+      let entries: string[] = []
+      try { entries = readdirSync(skillsDir) } catch { continue }
+      for (const entry of entries) {
+        if (entry.startsWith('.')) continue
+        const skillDirPath = join(skillsDir, entry)
+        try { if (!statSync(skillDirPath).isDirectory()) continue } catch { continue }
+        const skillMdPath = join(skillDirPath, 'SKILL.md')
+        if (!existsSync(skillMdPath)) continue
+        const content = readFileOr(skillMdPath, '')
+        let mtime = 0
+        try { mtime = statSync(skillMdPath).mtimeMs } catch { /* no-op */ }
+        result.push({
+          name: entry,
+          label: entry,
+          agentId: agentName,
+          description: parseSkillDescription(content),
+          keywords: parseSkillKeywords(content),
+          mtime,
+          source: 'agent',
+        })
+      }
+    }
+    result.sort((a, b) => a.agentId.localeCompare(b.agentId) || a.name.localeCompare(b.name))
+    json(res, result)
+    return true
+  }
+
   // Export must be matched before the generic /:name detail route, otherwise
   // the detail handler intercepts GET /api/skills/export as skillName="export".
   if (path === '/api/skills/export' && method === 'GET') {
@@ -192,6 +248,44 @@ export async function tryHandleSkills(ctx: RouteContext): Promise<boolean> {
   const globalSkillDetailMatch = path.match(/^\/api\/skills\/([^/]+)$/)
   if (globalSkillDetailMatch && method === 'GET') {
     const skillName = decodeURIComponent(globalSkillDetailMatch[1])
+
+    // When ?agent=<id> is supplied, resolve from that agent's local skills dir.
+    const agentParam = ctx.url.searchParams.get('agent')
+    if (agentParam) {
+      const validAgentIds = new Set([MAIN_AGENT_ID, ...listAgentNames()])
+      if (!validAgentIds.has(agentParam)) {
+        json(res, { error: 'Skill not found' }, 404)
+        return true
+      }
+      const agentSkillsRoot = agentParam === MAIN_AGENT_ID
+        ? join(PROJECT_ROOT, '.claude', 'skills')
+        : join(agentDir(agentParam), '.claude', 'skills')
+      const skillDir = join(agentSkillsRoot, skillName)
+      if (!skillDir.startsWith(agentSkillsRoot + sep)) {
+        json(res, { error: 'Skill not found' }, 404)
+        return true
+      }
+      const skillMdPath = join(skillDir, 'SKILL.md')
+      if (!existsSync(skillMdPath)) { json(res, { error: 'Skill not found' }, 404); return true }
+      const content = readFileOr(skillMdPath, '')
+      const files: string[] = []
+      try { for (const entry of readdirSync(skillDir)) files.push(entry) } catch { /* no-op */ }
+      let agentDetailMtime = 0
+      try { agentDetailMtime = statSync(skillMdPath).mtimeMs } catch { /* no-op */ }
+      json(res, {
+        name: skillName,
+        description: parseSkillDescription(content),
+        keywords: parseSkillKeywords(content),
+        content,
+        agents: [],
+        agentId: agentParam,
+        path: skillDir,
+        mtime: agentDetailMtime,
+        files,
+        source: 'agent',
+      })
+      return true
+    }
 
     if (skillName.includes(':')) {
       const lastColon = skillName.lastIndexOf(':')
@@ -429,6 +523,33 @@ export async function tryHandleSkills(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'Plugin skills cannot be edited' }, 403)
       return true
     }
+
+    const agentPutParam = ctx.url.searchParams.get('agent')
+    if (agentPutParam) {
+      const validPutAgentIds = new Set([MAIN_AGENT_ID, ...listAgentNames()])
+      if (!validPutAgentIds.has(agentPutParam)) {
+        json(res, { error: 'Skill not found' }, 404)
+        return true
+      }
+      const agentSkillsRoot = agentPutParam === MAIN_AGENT_ID
+        ? join(PROJECT_ROOT, '.claude', 'skills')
+        : join(agentDir(agentPutParam), '.claude', 'skills')
+      const skillDir = join(agentSkillsRoot, skillName)
+      if (!skillDir.startsWith(agentSkillsRoot + sep)) {
+        json(res, { error: 'Invalid skill name' }, 400)
+        return true
+      }
+      if (!existsSync(skillDir)) { json(res, { error: 'Skill not found' }, 404); return true }
+      const skillMdPath = join(skillDir, 'SKILL.md')
+      const body = await readBody(req)
+      const { content } = JSON.parse(body.toString()) as { content: string }
+      if (typeof content !== 'string') { json(res, { error: 'content is required' }, 400); return true }
+      atomicWriteFileSync(skillMdPath, content)
+      logger.info({ skillName, agentId: agentPutParam }, 'Agent-local skill updated via dashboard')
+      json(res, { ok: true })
+      return true
+    }
+
     const GLOBAL_SKILLS_DIR = join(homedir(), '.claude', 'skills')
     const skillDir = join(GLOBAL_SKILLS_DIR, skillName)
     if (!skillDir.startsWith(GLOBAL_SKILLS_DIR + sep)) {

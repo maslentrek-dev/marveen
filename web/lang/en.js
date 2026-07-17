@@ -463,11 +463,11 @@ window._i18n.en = {
 
   // --- Skills ---
   'skills.page_title':           'Skills',
-  'skills.page_subtitle':        'Skills visible to Claude Code (user folder + plugin cache)',
+  'skills.page_subtitle':        'Skills visible to Claude Code: global (user folder + plugin cache) and agent-local',
   'skills.stat.total':           'Total',
   'skills.stat.user':            'User (own)',
   'skills.stat.plugin':          'Plugin',
-  'skills.stat.documented':      'Documented',
+  'skills.stat.agent_local':     'Agent-local',
   'skills.error':                'Error loading',
   'skills.no_description':       'No description',
   'skills.content_not_found':    '(SKILL.md not found)',
@@ -502,6 +502,7 @@ window._i18n.en = {
   'skills.filter.all':           'All',
   'skills.filter.user':          'User',
   'skills.filter.plugin':        'Plugin',
+  'skills.filter.agent':         'Agent',
   'skills.mtime.title':          'Last modified',
   'skills.keywords.label':       'Keywords:',
   'skills.agents.label':         'Agents:',
