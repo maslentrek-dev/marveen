@@ -9,6 +9,7 @@ import { classifyAgentMessage, wrapAgentMessageForDelivery } from '../agent-mess
 import { ensureFederationClaudeMdSection } from '../federation/onboarding.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
+import { loadOpenRouterCatalog, fetchAllOpenRouterModels, loadCuratedManual, addCuratedManual, removeCuratedManual } from '../openrouter-models.js'
 import {
   agentDir,
   agentConfigRoot,
@@ -470,6 +471,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   // both in the "new agent" wizard and the agent edit panel.
   if (path === '/api/models/available' && method === 'GET') {
     const hasDeepseek = getSecret('DEEPSEEK_API_KEY') !== null
+    // OpenRouter is gated behind the vault key, same as DeepSeek: surfacing the
+    // options without the key would let the operator pick a model that 401s.
+    const hasOpenRouter = getSecret('openrouter-fleet-key') !== null
+    const orCatalog = loadOpenRouterCatalog()
     json(res, {
       claude: [
         { id: 'claude-fable-5', label: 'Fable 5 (legújabb)' },
@@ -484,7 +489,68 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
           ]
         : [],
       deepseekConfigured: hasDeepseek,
+      // OpenRouter tiers for the model picker. `auto` per tier feeds the "Auto"
+      // mode (stored as `openrouter-auto:<tierKey>`, resolved weekly-fresh at
+      // launch); `manual` (2 ids) feeds the "Manual" mode.
+      openrouter: hasOpenRouter
+        ? {
+            updated: orCatalog.updated,
+            tiers: orCatalog.tiers.map(t => ({
+              key: t.key,
+              label: t.label,
+              autoId: `openrouter-auto:${t.key}`,
+              auto: t.auto,
+              manual: t.manual,
+            })),
+          }
+        : null,
+      // User-curated manual models (ticked in the main agent's browse popup).
+      // Feeds the "OpenRouter - kézi" optgroup in every agent's model dropdown.
+      openrouterManual: hasOpenRouter ? loadCuratedManual() : [],
+      openrouterConfigured: hasOpenRouter,
     })
+    return true
+  }
+
+  // Curated manual-model list read/toggle. Curation is main-agent-only in the UI
+  // (the browse popup is hidden for sub-agents), but the API just gates on the
+  // vault key; the ticked set is shared across all agents' dropdowns.
+  if (path === '/api/openrouter/manual' && method === 'GET') {
+    if (getSecret('openrouter-fleet-key') === null) {
+      json(res, { error: 'OpenRouter not configured' }, 403)
+      return true
+    }
+    json(res, { models: loadCuratedManual() })
+    return true
+  }
+  if (path === '/api/openrouter/manual' && method === 'POST') {
+    if (getSecret('openrouter-fleet-key') === null) {
+      json(res, { error: 'OpenRouter not configured' }, 403)
+      return true
+    }
+    const body = await readBody(req)
+    const { id, name, checked } = JSON.parse(body.toString()) as { id?: string; name?: string; checked?: boolean }
+    if (!id || typeof id !== 'string') { json(res, { error: 'id is required' }, 400); return true }
+    const models = checked ? addCuratedManual(id, name || id) : removeCuratedManual(id)
+    json(res, { ok: true, models })
+    return true
+  }
+
+  // Full OpenRouter model list for the manual "browse all" picker popup.
+  // Gated behind the vault key like the tier group. The upstream /models list
+  // is public; the module caches it for 6h.
+  if (path === '/api/openrouter/models' && method === 'GET') {
+    if (getSecret('openrouter-fleet-key') === null) {
+      json(res, { error: 'OpenRouter not configured' }, 403)
+      return true
+    }
+    try {
+      const models = await fetchAllOpenRouterModels(Date.now())
+      json(res, { models })
+    } catch (err) {
+      logger.warn({ err }, 'openrouter models list fetch failed')
+      json(res, { error: 'Could not fetch OpenRouter models' }, 502)
+    }
     return true
   }
 
